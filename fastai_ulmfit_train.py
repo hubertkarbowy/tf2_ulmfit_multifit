@@ -91,7 +91,7 @@ def main(args):
         learner_obj = _run_finetuning(learner_obj, args)
     else:
         learner_obj = _run_pretraining(learner_obj, args)
-    print("Saving the {'MultiFiT' if args.get('qrnn') else 'ULMFiT'} model in FastAI format ...")
+    print(f"Saving the f{'MultiFiT' if args.get('qrnn') else 'ULMFiT'} model in FastAI format ...")
     os.makedirs(args['save_path'], exist_ok=True)
     learner_obj.save(os.path.join(args['save_path'], args['exp_name'])) # .pth will be added automatically
 

@@ -7,9 +7,45 @@ import tensorflow_text as text
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tqdm import trange
+from qrnn.qrnn_tf2 import QRNNCell_ # fixme: fix python imports
+from ulmfit_commons import get_rnn_layers_config
 
+# todo: un-hardcode the number of recurrent layers in AWD-related functions
 
-def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_args=None, vocab_size=None):
+def get_recurrent_layers(config, SpatialDrop1DLayer):
+    """
+    Generate recurrent layers (LSTM or QRNN) as specified in `config` and add 1D dropout.
+
+    It turns out that the generic Keras RNN API does not use CuDNN kernel for LSTM networks.
+    This will always run on a CPU:
+
+    rnn1 = tf.keras.layers.RNN(tf.keras.layers.LSTMCell(1152, kernel_initializer='glorot_uniform'),
+                               return_sequences=True, name="AWD_RNN1")
+
+    Whereas this will use a CuDNN kernel if a GPU is available:
+    rnn1 = tf.keras.layers.LSTM(1152, kernel_initializer='glorot_uniform', return_sequences=True,
+                                name=f"AWD_RNN1")
+    """
+    rnn_layers = []
+    for i in range(config['num_recurrent_layers']):
+        if config['qrnn']:
+            layer = tf.keras.layers.RNN(QRNNCell(config['num_hidden_units'][i],
+                                                 kernel_window=config['qrnn_kernel_window'][i],
+                                                 zoneout=config['qrnn_zoneout'],
+                                                 pooling=config['qrnn_pooling'],
+                                                 keep_fastai_bug=config['keep_fastai_bug']),
+                                        return_sequences=True,
+                                        name=f"QRNN{i+1}")
+        else:
+            layer = tf.keras.layers.LSTM(config['num_hidden_units'][i],
+                                         kernel_initializer='glorot_uniform',
+                                         return_sequences=True,
+                                         name=f"AWD_RNN{i+1}")
+        drop = SpatialDrop1DLayer(0.3, name=f"rnn_drop{i+1}")
+        rnn_layers.append((layer, drop))
+    return rnn_layers
+
+def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_args=None, vocab_size=None, layer_config=None):
     """ Builds an ULMFiT as a model trainable in Keras.
 
         :param fixed_seq_len:            if set to `None`, builds a variable-length model with RaggedTensors.
@@ -24,6 +60,16 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
                                          will not be created and you will need to numericalize the data yourself.
         :param vocab_size:               (only relevant if `spm_args` is None) - number of subwords in the
                                          vocabulary.
+        :param layer_config:             an optional dictionary to configure the model's layers. Defaults will kick in where
+                                         the values are not supplied explicitly. The configuration keys are as follows:
+                                             `qrnn` - boolean, if set to True the LSTM cells are replaced with QRNN ones (default: False)
+                                             `emb_dim` - dimensionality of the embeddings layer (default: 400)
+                                             `num_recurrent_layers` - int, number of recurrent layers (default: 3 for LSTM, 4 for QRNN)
+                                             `num_hidden_units` - List[int], number of hidden units in each recurrent layer
+                                                                  (default: [1152, 1152, 400] for LSTM, [1552, 1552, 1552, 400] for QRNN)
+                                             `qrnn_kernel_window` - int, QRNN kernel size (default: 2)
+                                             `qrnn_pooling` - str, pooling method for the QRNN layer (default: 'fo')
+                                             `qrnn_zoneout` - float, zoneout value for the QRNN layer (default: 0.0)
         :return: Returns four instances of tf.keras.Model:
         lm_model_num - encoder with a language modelling head on top (and weights tied to embeddings).
                        This version accepts already numericalized text.
@@ -54,6 +100,8 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
                       this layer TRUNCATES the text if it's longer than fixed_seq_len tokens and AUTOMATICALLY
                       ADDS PADDING WITH A VALUE OF 1 if needed.
     """
+    ##### STAGE 0 - SET UP HYPERPARAMETERS #########
+    config = get_rnn_layers_config(layer_config)
 
     ##### STAGE 1 - BUILD AN SPM ENCODER LAYER #####
     if not any([spm_args, vocab_size]):
@@ -111,29 +159,7 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
     input_dropout = SpatialDrop1DLayer(0.4, name=f"{layer_name_prefix}inp_dropout")
 
     ###### STAGE 3 - RECURRENT LAYERS ######
-    # Plain LSTM cells - we will apply AWD manually in the training loop
-    # It turns out that the generic RNN API below will not use CuDNN kernel for LSTM networks.
-    #rnn1 = tf.keras.layers.RNN(tf.keras.layers.LSTMCell(1152, kernel_initializer='glorot_uniform'),
-    #                           return_sequences=True, name="AWD_RNN1")
-    #rnn1_drop = SpatialDrop1DLayer(0.3, name=f"{layer_name_prefix}rnn_drop1")
-    #rnn2 = tf.keras.layers.RNN(tf.keras.layers.LSTMCell(1152, kernel_initializer='glorot_uniform'),
-    #                           return_sequences=True, name="AWD_RNN2")
-    #rnn2_drop = SpatialDrop1DLayer(0.3, name=f"{layer_name_prefix}rnn_drop2")
-    #rnn3 = tf.keras.layers.RNN(tf.keras.layers.LSTMCell(400, kernel_initializer='glorot_uniform'),
-    #                           return_sequences=True, name="AWD_RNN3")
-    #rnn3_drop = SpatialDrop1DLayer(0.4, name=f"{layer_name_prefix}rnn_drop3")
-
-
-    # However, invoking the LSTM layer directly uses CuDNN if available
-    rnn1 = tf.keras.layers.LSTM(1152, kernel_initializer='glorot_uniform', return_sequences=True,
-                                name=f"AWD_RNN1")
-    rnn1_drop = SpatialDrop1DLayer(0.3, name=f"rnn_drop1")
-    rnn2 = tf.keras.layers.LSTM(1152, kernel_initializer='glorot_uniform', return_sequences=True,
-                                name=f"AWD_RNN2")
-    rnn2_drop = SpatialDrop1DLayer(0.3, name=f"rnn_drop2")
-    rnn3 = tf.keras.layers.LSTM(400, kernel_initializer='glorot_uniform', return_sequences=True,
-                                 name=f"AWD_RNN3")
-    rnn3_drop = SpatialDrop1DLayer(0.2, name=f"rnn_drop3")
+    rnn_layers_with_dropout = get_recurrent_layers(config, SpatialDrop1DLayer)
 
     ###### STAGE 4. THE ACTUAL ENCODER MODEL ######
     numericalized_input = tf.keras.layers.Input(shape=(fixed_seq_len,), dtype=tf.int32,
@@ -143,16 +169,21 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
     m = embedz(numericalized_input)
     m = encoder_dropout(m)
     m = input_dropout(m)
-    m = rnn1(m)
-    m = rnn1_drop(m)
-    m = rnn2(m)
-    m = rnn2_drop(m)
-    m = rnn3(m)
-    rnn_encoder = rnn3_drop(m)
+
+    for (rnn_layer, dropout_layer) in rnn_layers_with_dropout:
+        m = rnn_layer(m)
+        m = dropout_layer(m)
+        last_drop = m  # yes, to the last drop!
+
+    rnn_encoder = last_drop
 
     ###### OPTIONAL LANGUAGE MODELLING HEAD FOR FINETUNING #######
-    fc_head = tf.keras.layers.TimeDistributed(TiedDense(reference_layer=embedz, activation='softmax'),
-                                              name='lm_head_tied')
+    if config['num_hidden_units'][-1] == config['emb_dim']:
+        fc_head = tf.keras.layers.TimeDistributed(TiedDense(reference_layer=embedz, activation='softmax'),
+                                                  name='lm_head_tied')
+    else:
+        print("Embedding dimensions are different than the encoder output's dimensions. Cannot apply weight-tying.")
+        fc_head = tf.keras.layers.Dense(vocab_size_, activation='softmax', name='lm_head_untied')
     fc_head_dp = tf.keras.layers.Dropout(0.05)
     lm = fc_head(rnn_encoder)
     lm = fc_head_dp(lm)
@@ -168,10 +199,13 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
     outmask_num = tf.keras.Model(inputs=numericalized_input, outputs=explicit_mask)
     return lm_model_num, encoder_num, outmask_num, spm_encoder_model
 
-class ExportableULMFiT(tf.keras.Model):
+class ExportableGenericRecurrentLM(tf.keras.Model):
     """
-    This class encapsulates a TF2 SavedModel serializable version of ULMFiT with a couple of useful
+    This class encapsulates a TF2 SavedModel serializable version of an RNN language model with a couple of useful
     signatures for flexibility.
+
+    Use this class to export a QRNN model. If you want to export an ULMFiT model, use the ExportableULMFiT class
+    instead to include AWD regularization. QRNNs lack recurrent weights, so AWD does not apply.
 
     Serialization procedure:
 
@@ -231,6 +265,26 @@ class ExportableULMFiT(tf.keras.Model):
         return {'output': self.encoder_num(numericalized),
                 'mask': mask}
 
+    @tf.function(input_signature=[tf.TensorSpec([None, ], dtype=tf.string)])
+    def string_encoder(self, string_inputs):
+        numerical_representation = self.string_numericalizer(string_inputs)
+        hidden_states = self.numericalized_encoder(numerical_representation['numericalized'])['output']
+        return {'output': hidden_states,
+                'numericalized': numerical_representation['numericalized'],
+                'mask': numerical_representation['mask']}
+
+    @tf.function(input_signature=[tf.TensorSpec([None, ], dtype=tf.string)])
+    def string_numericalizer(self, string_inputs):
+        numerical_representation = self.spm_encoder_model(string_inputs)
+        mask = self.masker_num(numerical_representation)
+        return {'numericalized': numerical_representation,
+                'mask': mask}
+
+class ExportableULMFiT(ExportableGenericRecurrentLM):
+
+    def __init__(self, encoder_num, outmask_num, spm_encoder_model, lm_head_biases=None):
+        super().__init__(encoder_num, outmask_num, spm_encoder_model, lm_head_biases)
+
     @tf.function(input_signature=[tf.TensorSpec((), dtype=tf.float32)])
     def apply_awd(self, awd_rate):
         # tf.print("Applying AWD in graph mode")
@@ -247,20 +301,6 @@ class ExportableULMFiT(tf.keras.Model):
         w3_mask = tf.nn.dropout(tf.fill(rnn3_w[1].shape, 1-awd_rate), rate=awd_rate)
         rnn3_w[1].assign(w3_mask * rnn3_w[2])
 
-    @tf.function(input_signature=[tf.TensorSpec([None, ], dtype=tf.string)])
-    def string_encoder(self, string_inputs):
-        numerical_representation = self.string_numericalizer(string_inputs)
-        hidden_states = self.numericalized_encoder(numerical_representation['numericalized'])['output']
-        return {'output': hidden_states,
-                'numericalized': numerical_representation['numericalized'],
-                'mask': numerical_representation['mask']}
-
-    @tf.function(input_signature=[tf.TensorSpec([None, ], dtype=tf.string)])
-    def string_numericalizer(self, string_inputs):
-        numerical_representation = self.spm_encoder_model(string_inputs)
-        mask = self.masker_num(numerical_representation)
-        return {'numericalized': numerical_representation,
-                'mask': mask}
 
     ################## UNSUPPORTED / EXPERIMENTAL #################
 
@@ -460,6 +500,10 @@ class RaggedSparseCategoricalCrossEntropy(tf.keras.losses.SparseCategoricalCross
     def call(self, y_true, y_pred):
         return super().call(y_true.flat_values, y_pred.flat_values)
 
+
+@keras_register_once(package='Custom', name='QRNNCell')
+class QRNNCell(QRNNCell_):
+    pass
 
 # @tf.keras.utils.register_keras_serializable()
 @keras_register_once(package='Custom', name='RaggedEmbeddingDropout')

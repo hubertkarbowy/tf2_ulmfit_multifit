@@ -9,6 +9,17 @@ import sentencepiece as spm
 
 # from ulmfit_tf2 import AWDCallback, LRFinder
 
+DEFAULT_LAYER_CONFIG = {
+    'qrnn': False,
+    'emb_dim': 400,
+    'num_recurrent_layers': None,
+    'num_hidden_units': None,
+    'qrnn_kernel_window': None,
+    'qrnn_pooling': 'fo',
+    'qrnn_zoneout': 0.0,
+    'keep_fastai_bug': True
+}
+
 
 def file_len(fname):
     """ Nothing beats wc -l """
@@ -102,3 +113,21 @@ def print_training_info(*, args, x_train, y_train):
           f"Total steps: {num_steps}\n" \
           f"AWD after each batch: {'off' if args.get('awd_off') is True else 'on'}\n" \
           f"******************************************************************")
+
+def get_rnn_layers_config(layer_config):
+    config = DEFAULT_LAYER_CONFIG.copy()
+    config.update(layer_config or {})
+    if config.get('num_recurrent_layers') is None:
+        config['num_recurrent_layers'] = 4 if config['qrnn'] else 3
+    if config.get('num_hidden_units') is None:
+        config['num_hidden_units'] = [1552, 1552, 1552, config['emb_dim']] if config['qrnn'] \
+                                     else [1152, 1152, config['emb_dim']]
+    if config.get('qrnn_kernel_window') is None and config['qrnn']:
+        if config['keep_fastai_bug']:
+            config['qrnn_kernel_window'] = [2] + [1]*(config['num_recurrent_layers']-1)
+        else:
+            config['qrnn_kernel_window'] = [2]*config['num_recurrent_layers']
+    assert config['num_recurrent_layers'] == len(config['num_hidden_units']), f"You requested {config['num_recurrent_layers']} " \
+        f"recurrent layers, but provided only {len(config['num_hidden_units'])} values for the numbers of their hidden " \
+        f"units: {config['num_hidden_units']}"
+    return config
