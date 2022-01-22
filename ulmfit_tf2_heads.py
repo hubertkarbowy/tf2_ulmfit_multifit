@@ -5,11 +5,11 @@ from ulmfit_tf2 import tf2_ulmfit_encoder, HubRaggedWrapper, TiedDense, RaggedCo
 
 
 def ulmfit_rnn_encoder_native(*, pretrained_weights=None, fixed_seq_len=None, spm_model_args,
-                              also_return_spm_encoder=False, return_lm_head=False):
+                              also_return_spm_encoder=False, return_lm_head=False, layer_config=None):
     """ Returns an ULMFiT encoder from Python code """
     print("Building model from Python code (not tf.saved_model)...")
     lm_num, enc_num, _, spm_encoder_model = tf2_ulmfit_encoder(fixed_seq_len=fixed_seq_len, spm_args=spm_model_args,
-                                                               flatten_ragged_outputs=False)
+                                                               flatten_ragged_outputs=False, layer_config=layer_config)
     if pretrained_weights is not None:
         print("Restoring weights from file....")
         lm_num.load_weights(pretrained_weights)
@@ -68,14 +68,15 @@ def ulmfit_rnn_encoder_hub(*, pretrained_weights=None, fixed_seq_len=None, spm_m
     return model, restored_hub
 
 
-def ulmfit_sequence_tagger(*, model_type, pretrained_encoder_weights, spm_model_args=None, fixed_seq_len=None, num_classes):
+def ulmfit_sequence_tagger(*, model_type, pretrained_encoder_weights, spm_model_args=None, fixed_seq_len=None, num_classes, layer_config=None):
 
     ######## VERSION 1: ULMFiT sequence tagger model built from Python code - pass the path to a weights directory
     if model_type == 'from_cp':
         ulmfit_rnn_encoder = ulmfit_rnn_encoder_native(pretrained_weights=pretrained_encoder_weights,
-                                               spm_model_args=spm_model_args,
-                                               fixed_seq_len=fixed_seq_len,
-                                               also_return_spm_encoder=False)
+                                                       spm_model_args=spm_model_args,
+                                                       fixed_seq_len=fixed_seq_len,
+                                                       also_return_spm_encoder=False,
+                                                       layer_config=layer_config)
         hub_object = None
 
     ######## VERSION 2: ULMFiT sequence tagged built from a serialized SavedModel - pass the path to a directory containing 'saved_model.pb'
@@ -92,14 +93,15 @@ def ulmfit_sequence_tagger(*, model_type, pretrained_encoder_weights, spm_model_
     return tagger_model, hub_object
 
 
-def ulmfit_last_hidden_state(*, model_type, pretrained_encoder_weights, spm_model_args=None, fixed_seq_len=None):
+def ulmfit_last_hidden_state(*, model_type, pretrained_encoder_weights, spm_model_args=None, fixed_seq_len=None, layer_config=None):
 
     ######## VERSION 1: ULMFiT last state built from Python code - pass the path to a weights directory
     if model_type == 'from_cp':
         ulmfit_rnn_encoder = ulmfit_rnn_encoder_native(pretrained_weights=pretrained_encoder_weights,
                                                        spm_model_args=spm_model_args,
                                                        fixed_seq_len=fixed_seq_len,
-                                                       also_return_spm_encoder=False)
+                                                       also_return_spm_encoder=False,
+                                                       layer_config=layer_config)
         hub_object = None
 
     ######## VERSION 2: ULMFiT last state built from a serialized SavedModel - pass the path to a directory containing 'saved_model.pb'
@@ -122,7 +124,8 @@ def ulmfit_last_hidden_state(*, model_type, pretrained_encoder_weights, spm_mode
 
 def ulmfit_document_classifier(*, model_type, pretrained_encoder_weights, num_classes,
                                spm_model_args=None, fixed_seq_len=None, use_bias=False,
-                               with_batch_normalization=False, activation='softmax'):
+                               with_batch_normalization=False, activation='softmax',
+                               layer_config=None):
     """
     Document classification head as per the ULMFiT paper:
        - AvgPool + MaxPool + Last hidden state
@@ -132,9 +135,10 @@ def ulmfit_document_classifier(*, model_type, pretrained_encoder_weights, num_cl
     ######## VERSION 1: ULMFiT last state built from Python code - pass the path to a weights directory
     if model_type == 'from_cp':
         ulmfit_rnn_encoder = ulmfit_rnn_encoder_native(pretrained_weights=pretrained_encoder_weights,
-                                               spm_model_args=spm_model_args,
-                                               fixed_seq_len=fixed_seq_len,
-                                               also_return_spm_encoder=False)
+                                                       spm_model_args=spm_model_args,
+                                                       fixed_seq_len=fixed_seq_len,
+                                                       also_return_spm_encoder=False,
+                                                       layer_config=layer_config)
         hub_object=None
 
     ######## VERSION 2: ULMFiT last state built from a serialized SavedModel - pass the path to a directory containing 'saved_model.pb'
@@ -169,9 +173,8 @@ def ulmfit_document_classifier(*, model_type, pretrained_encoder_weights, num_cl
     return document_classifier_model, hub_object
 
 
-def ulmfit_regressor(*, model_type, pretrained_encoder_weights,
-                     spm_model_args=None, fixed_seq_len=None,
-                     with_batch_normalization=False):
+def ulmfit_regressor(*, model_type, pretrained_encoder_weights, spm_model_args=None, fixed_seq_len=None,
+                     with_batch_normalization=False, layer_config=None):
     """
     Regression head which outputs a single numerical value. The architecture is similar to
     the document classification head and differs only in the last layer (a single neuron
@@ -184,7 +187,8 @@ def ulmfit_regressor(*, model_type, pretrained_encoder_weights,
                                                        fixed_seq_len=fixed_seq_len,
                                                        use_bias=True,
                                                        with_batch_normalization=with_batch_normalization,
-                                                       activation='linear')
+                                                       activation='linear',
+                                                       layer_config=layer_config)
     return regressor, hub_object
 
 ########### ORIGINAL CODE LEFT FOR REFERENCE ###########

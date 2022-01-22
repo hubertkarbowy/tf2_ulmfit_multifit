@@ -9,6 +9,7 @@ import sentencepiece as spm
 
 # from ulmfit_tf2 import AWDCallback, LRFinder
 
+# todo: it should also be possible to define pooling and zoneout on a per-layer basis
 DEFAULT_LAYER_CONFIG = {
     'qrnn': False,
     'emb_dim': 400,
@@ -79,6 +80,9 @@ def prepare_keras_callbacks(*, args, model, hub_object,
     from ulmfit_tf2 import AWDCallback, LRFinder
     callbacks = []
     if not args.get('awd_off'):
+        if args.get('qrnn'):
+            raise ValueError("Unable to apply AWD on a QRNN architecture, as it lacks recurrent weights. "\
+                             "Use `--awd-off` and optionally set zoneout instead.")
         callbacks.append(AWDCallback(model_object=model if hub_object is None else None,
                                      hub_object=hub_object))
     if args.get('lr_finder'):

@@ -89,7 +89,6 @@ class QRNNCell_(tf.keras.layers.Layer):
 
     def call(self, inputs, states=None, training=None):
         num_input_features = tf.shape(inputs)[1]
-        print(num_input_features)
         incoming_memory = states or self.get_initial_state(inputs)
         inputs_at_t = inputs
         inputs_at_t_minus_k = incoming_memory[1]

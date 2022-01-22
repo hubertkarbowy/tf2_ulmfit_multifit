@@ -132,11 +132,15 @@ def main(args):
     validation_data = (x_test, y_test) if x_test is not None else None
     spm_args = {'spm_model_file': args['spm_model_file'], 'add_bos': True, 'add_eos': True,
                 'lumped_sents_separator': '[SEP]'}
+    layer_config = {'qrnn': args.get('qrnn'),
+                    'num_recurrent_layers': args.get('num_recurrent_layers'),
+                    'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
     ulmfit_regressor_model, hub_object = ulmfit_regressor(model_type=args['model_type'],
-                                                    pretrained_encoder_weights=args['model_weights_cp'],
-                                                    spm_model_args=spm_args,
-                                                    fixed_seq_len=args.get('fixed_seq_len'),
-                                                    with_batch_normalization=args.get('with_batch_normalization') or False)
+                                                          pretrained_encoder_weights=args['model_weights_cp'],
+                                                          spm_model_args=spm_args,
+                                                          fixed_seq_len=args.get('fixed_seq_len'),
+                                                          with_batch_normalization=args.get('with_batch_normalization') or False,
+                                                          layer_config=layer_config)
     ulmfit_regressor_model.summary()
     num_steps = (x_train.shape[0] // args['batch_size']) * args['num_epochs']
     print_training_info(args=args, x_train=x_train, y_train=y_train)
@@ -175,6 +179,10 @@ if __name__ == "__main__":
     argz.add_argument("--model-weights-cp", required=True, help="For training: path to *weights* (checkpoint) of " \
                                                                 "the generic model." \
                                                                 "For demo: path to *weights* produced by this script")
+    argz.add_argument("--qrnn", action='store_true', help="Set this if the pretrained weights contain a QRNN-based encoder, " \
+                                                          "otherwise it's an ULMFiT-based model.")
+    argz.add_argument("--qrnn-zoneout", type=float, help="Optional zoneout for the QRNN model.")
+    argz.add_argument("--num-recurrent-layers", type=int, help="Number of recurrent layers in the encoder.")
     argz.add_argument("--model-type", choices=['from_cp', 'from_hub'], default='from_cp', \
                                                            help="Model type: from_cp = from checkpoint, from_hub = from TensorFlow hub")
     argz.add_argument('--spm-model-file', required=True, help="Path to SentencePiece model file")
