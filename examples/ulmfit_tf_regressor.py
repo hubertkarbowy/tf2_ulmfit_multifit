@@ -85,11 +85,15 @@ def evaluate(args):
     test_df = read_data['df']
     spm_args = {'spm_model_file': args['spm_model_file'], 'add_bos': True, 'add_eos': True,
                 'lumped_sents_separator': '[SEP]'}
+    layer_config = {'qrnn': args.get('qrnn'),
+                    'num_recurrent_layers': args.get('num_recurrent_layers'),
+                    'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
     ulmfit_regressor_model, hub_object = ulmfit_regressor(model_type=args['model_type'],
                                                           pretrained_encoder_weights=None,
                                                           spm_model_args=spm_args,
                                                           fixed_seq_len=args.get('fixed_seq_len'),
-                                                          with_batch_normalization=args.get('with_batch_normalization') or False)
+                                                          with_batch_normalization=args.get('with_batch_normalization') or False,
+                                                          layer_config=layer_config)
     ulmfit_regressor_model.load_weights(args['model_weights_cp'])
     ulmfit_regressor_model.summary()
     y_preds = ulmfit_regressor_model.predict(x_test, batch_size=args['batch_size'],

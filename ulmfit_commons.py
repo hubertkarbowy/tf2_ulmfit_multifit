@@ -124,8 +124,20 @@ def get_rnn_layers_config(layer_config):
     if config.get('num_recurrent_layers') is None:
         config['num_recurrent_layers'] = 4 if config['qrnn'] else 3
     if config.get('num_hidden_units') is None:
-        config['num_hidden_units'] = [1552, 1552, 1552, config['emb_dim']] if config['qrnn'] \
-                                     else [1152, 1152, config['emb_dim']]
+        if config['qrnn']:
+            if config['num_recurrent_layers'] == 4:
+                config['num_hidden_units'] = [1552, 1552, 1552, config['emb_dim']]
+            elif config['num_recurrent_layers'] == 3:
+                config['num_hidden_units'] = [1552, 1552, config['emb_dim']]
+            else:
+                raise ValueError("Please provide dimensions of recurrent QRNN layers explicitly if " \
+                                 "you don't use the default number of 3 or 4.")
+        else:
+            if config['num_recurrent_layers'] == 3:
+                config['num_hidden_units'] = [1152, 1152, config['emb_dim']]
+            else:
+                raise ValueError("Please provide dimensions of recurrent LSTM layers explicitly if " \
+                                 "you don't use the default number of 3.")
     if config.get('qrnn_kernel_window') is None and config['qrnn']:
         if config['keep_fastai_bug']:
             config['qrnn_kernel_window'] = [2] + [1]*(config['num_recurrent_layers']-1)
