@@ -3,6 +3,7 @@ import argparse, re
 import json, csv
 import tensorflow as tf
 from tqdm import tqdm
+from sklearn.preprocessing import MultiLabelBinarizer
 
 BEGIN_INDEX = 2
 END_INDEX = 3
@@ -60,6 +61,137 @@ def mark_multiple_spans(context, query):
         last_span_end = span2[1]
         truncating_context = truncating_context[span[1]:]
     return spans
+
+
+
+
+########### SUBWORD TOKENIZATION AND LABEL ALIGNMENT IN MANY FLAVORS ####################
+
+def tokenize_and_align_labels_single(*,
+                                     spmproc_info,
+                                     sent,
+                                     max_seq_len,
+                                     do_padding=False,
+                                     rev_label_map=None,
+                                     is_multilabel,
+                                     onehot_encoder=None,
+                                     add_bos,
+                                     add_eos):
+    """
+    Given a sentencepiece object `spmproc` and a whitespace-pretokenized sentence `s`,
+    do the following:
+         1. perform subword tokenization
+         2. align labels to new subwords
+         3. encode labels as integers as laid out in `rev_label_map` (optionally)
+
+    `sent` is a list of tuples whose zeroath elements contain the whitespace-separated token
+    and first elements contain labels encoded as strings. If `is_multilabel` is set to True,
+    the untagged tokens have an empty array of labels (i.e. []) associated with them.
+    Otherwise, it is assumed that such tokens are represented by the label 0.
+    """
+    spmproc = spmproc_info['spmproc']
+    if add_bos and spmproc._add_bos:
+        raise ValueError("When realigning labels to subwords, please disable `add_bos` in the Sentencepiece object")
+    if add_eos and spmproc._add_eos:
+        raise ValueError("When realigning labels to subwords, please disable `add_eos` in the Sentencepiece object")
+    if onehot_encoder is not None and rev_label_map is None:
+        raise ValueError("Please provide a reverse labels map if requesting to one-hot encode/multiencode the labels")
+    no_label_symbol = [] if is_multilabel else 'O'
+    sentence_tokens = []
+    sentence_ids = []
+    sentence_labels = []
+    for whitespace_token in sent:
+        subwords = spmproc.encode_as_pieces(whitespace_token[0])
+        sentence_tokens.extend(subwords)
+        sentence_ids.extend(spmproc.encode_as_ids(whitespace_token[0]))
+        sentence_labels.extend([whitespace_token[1]]*len(subwords))
+    if max_seq_len is not None:
+        # minus up to 2 tokens for BOS and EOS since the encoder was trained on sentences with these markers
+        num_additional_stripped = int(bool(add_bos)) + int(bool(add_eos))
+        sentence_tokens = sentence_tokens[:max_seq_len-num_additional_stripped]
+        sentence_ids = sentence_ids[:max_seq_len-num_additional_stripped]
+        sentence_labels = sentence_labels[:max_seq_len-num_additional_stripped]
+    if add_bos:
+        sentence_tokens = [spmproc.id_to_piece(spmproc.bos_id())] + sentence_tokens
+        sentence_ids = [spmproc.bos_id()] + sentence_ids
+        sentence_labels = [no_label_symbol] + sentence_labels
+    if add_eos:
+        sentence_tokens = sentence_tokens + [spmproc.id_to_piece(spmproc.eos_id())]
+        sentence_ids = sentence_ids + [spmproc.eos_id()]
+        sentence_labels = sentence_labels + [no_label_symbol]
+    if do_padding:
+        if max_seq_len is None:
+            raise ValueError("Please specify the maximum sequence length if requesting padding.")
+        num_pads = max(0, max_seq_len - len(sentence_tokens))
+        sentence_tokens = sentence_tokens + [spmproc_info['pad_piece']]*num_pads
+        sentence_ids = sentence_ids + [spmproc_info['pad_id']]*num_pads
+        sentence_labels = sentence_labels + [no_label_symbol]*num_pads
+        assert len(sentence_tokens) == len(sentence_ids) == len(sentence_labels) == max_seq_len
+
+    # optionally encode labels:
+    if rev_label_map:
+        if is_multilabel:
+            encoded_labels = [[rev_label_map[l] for l in labels] for labels in sentence_labels]
+            if onehot_encoder is not None:
+                encoded_labels = onehot_encoder.fit_transform([l for l in encoded_labels])
+        else:
+            encoded_labels = [rev_label_map[l] for l in sentence_labels]
+            if onehot_encoder is not None:
+                encoded_labels = onehot_encoder.fit_transform([[l] for l in encoded_labels])
+    else:
+        encoded_labels = None
+    return sentence_tokens, sentence_ids, sentence_labels, encoded_labels
+
+
+def tokenize_and_align_labels(*,
+                              spmproc,
+                              sents,
+                              max_seq_len,
+                              do_padding,
+                              rev_label_map=None,
+                              is_multilabel,
+                              onehot_encode,
+                              add_bos,
+                              add_eos):
+    """
+    Performs Sentencepiece tokenization on an already whitespace-tokenized text
+    and aligns labels to subwords
+    """
+
+    print(f"Tokenizing and aligning {len(sents)} examples...")
+    if max_seq_len is not None:
+        print(f"Note: inputs will be truncated to the first {max_seq_len - 2} tokens")
+    if onehot_encode and rev_label_map is None:
+        raise ValueError("Please provide a reverse labels map if requesting to one-hot encode/multiencode the labels")
+    if onehot_encode:
+        onehot_encoder = MultiLabelBinarizer(classes=range(len(rev_label_map)))
+    else:
+        onehot_encoder = None
+    tokenized = []
+    numericalized = []
+    labels = []
+    encoded_labels = []
+    spmproc_info = {
+        'spmproc': spmproc,
+        'pad_id': spmproc.pad_id(),
+        'pad_piece': spmproc.id_to_piece(spmproc.pad_id())
+    }
+    for sent in tqdm(sents):
+        sentence_tokens, sentence_ids, sentence_labels, sentence_encoded_labels = \
+            tokenize_and_align_labels_single(spmproc_info=spmproc_info,
+                                             sent=sent,
+                                             max_seq_len=max_seq_len,
+                                             do_padding=do_padding,
+                                             rev_label_map=rev_label_map,
+                                             is_multilabel=is_multilabel,
+                                             onehot_encoder=onehot_encoder,
+                                             add_bos=add_bos,
+                                             add_eos=add_eos)
+        tokenized.append(sentence_tokens)
+        numericalized.append(sentence_ids)
+        labels.append(sentence_labels)
+        encoded_labels.append(sentence_encoded_labels)
+    return tokenized, numericalized, labels, encoded_labels
 
 
 def subword_tokenize_and_find_label_spans(*, spm_layer, input_tsv,

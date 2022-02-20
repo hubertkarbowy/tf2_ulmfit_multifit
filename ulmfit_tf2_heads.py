@@ -68,7 +68,8 @@ def ulmfit_rnn_encoder_hub(*, pretrained_weights=None, fixed_seq_len=None, spm_m
     return model, restored_hub
 
 
-def ulmfit_sequence_tagger(*, model_type, pretrained_encoder_weights, spm_model_args=None, fixed_seq_len=None, num_classes, layer_config=None):
+def ulmfit_sequence_tagger(*, model_type, pretrained_encoder_weights, spm_model_args=None, fixed_seq_len=None, num_classes,
+                           activation, layer_config=None):
 
     ######## VERSION 1: ULMFiT sequence tagger model built from Python code - pass the path to a weights directory
     if model_type == 'from_cp':
@@ -87,8 +88,8 @@ def ulmfit_sequence_tagger(*, model_type, pretrained_encoder_weights, spm_model_
                                                                 also_return_spm_encoder=False)
     else:
         raise ValueError(f"Unknown model type {args['model_type']}")
-    print(f"Adding sequence tagging head with n_classes={num_classes}")
-    tagger_head = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(num_classes, activation='softmax'))(ulmfit_rnn_encoder.output)
+    print(f"Adding sequence tagging head with n_classes={num_classes}. Activation fn is '{activation}'.")
+    tagger_head = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(num_classes, activation=activation))(ulmfit_rnn_encoder.output)
     tagger_model = tf.keras.models.Model(inputs=ulmfit_rnn_encoder.inputs, outputs=tagger_head)
     return tagger_model, hub_object
 

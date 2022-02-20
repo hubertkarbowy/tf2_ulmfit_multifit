@@ -19,8 +19,11 @@ class LMTokenizerFactory:
         if tokenizer_type == 'spm':
             tok_obj = spm.SentencePieceProcessor(tokenizer_file)
             extra_opts = []
-            if add_bos: extra_opts.append("bos")
-            if add_eos: extra_opts.append("eos")
+            # Setting the ._add_bos or ._add_eos fields has no effect - the only way to modify sentencepiece object's
+            # behavior is to pass these settings as extra options. However, we do set these fields anyway
+            # for sanity checks in the sequence tagger.
+            if add_bos: extra_opts.append("bos"); tok_obj._add_bos = True
+            if add_eos: extra_opts.append("eos"); tok_obj._add_eos = True
             tok_obj.set_encode_extra_options(":".join(extra_opts))
         elif tokenizer_type == 'spm_tf_text':
             tok_obj = SPMNumericalizer(spm_path=tokenizer_file, add_bos=add_bos, add_eos=add_eos,
