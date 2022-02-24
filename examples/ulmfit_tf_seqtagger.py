@@ -1,6 +1,6 @@
 import argparse
 import json
-import os
+import os, random
 import readline
 
 import tensorflow as tf
@@ -19,7 +19,7 @@ def r_jsonl(file_path):
         return [json.loads(line) for line in f]
 
 def read_labels(label_path):
-    label_map = json.load(open(argz['label_map'], 'r', encoding='utf-8'))
+    label_map = json.load(open(label_path, 'r', encoding='utf-8'))
     label_map = {int(k):v for k,v in label_map.items()}
     rev_label_map = {v:k for k,v in label_map.items()}
     return label_map, rev_label_map
@@ -137,6 +137,11 @@ def main(args):
                                                                                  onehot_encode=True if args.get('multilabel') else False,
                                                                                  add_bos=True,
                                                                                  add_eos=True)
+    r = random.randint(0, len(tokenized)-1)
+    print(f"Sentence {r} and its tags:")
+    for t, n, l, el in zip(tokenized[r], numericalized[r], labels[r], encoded_labels[r]):
+        print(f"{t}\t{n}\t{l}\t{el}")
+
     print(f"Generating {'ragged' if args.get('fixed_seq_len') is None else 'dense'} tensor inputs...")
     if args.get('fixed_seq_len') is not None:
         sequence_inputs = tf.constant(numericalized, dtype=tf.uint32)
@@ -151,6 +156,7 @@ def main(args):
     if args.get('multilabel'):
         activation = 'sigmoid'
         loss_fn = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+        # loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=False)
     else:
         activation = 'softmax'
         loss_fn = RaggedSparseCategoricalCrossEntropy() \
@@ -161,7 +167,8 @@ def main(args):
                                                        spm_model_args=spm_args,
                                                        fixed_seq_len=args.get('fixed_seq_len'),
                                                        num_classes=len(label_map),
-                                                       activation=activation)
+                                                       activation=activation,
+                                                       layer_config=layer_config)
 
     num_steps = (sequence_inputs.shape[0] // args['batch_size']) * args['num_epochs']
     print_training_info(args=args, x_train=sequence_inputs, y_train=subword_labels)
@@ -170,8 +177,9 @@ def main(args):
     else:
         scheduler = args['lr']
     optimizer_fn = tf.keras.optimizers.Adam(learning_rate=scheduler)
+    main_metric = 'accuracy' if args.get('multilabel') else 'sparse_categorical_accuracy'
     callbacks = prepare_keras_callbacks(args=args, model=ulmfit_tagger, hub_object=hub_object,
-                                        monitor_metric='sparse_categorical_accuracy')
+                                        monitor_metric=main_metric)
     if args.get('lr_scheduler') == '1cycle':
         print("Fitting with one-cycle")
         callbacks.append(OneCycleScheduler(steps=num_steps, lr_max=args['lr']))
@@ -184,23 +192,11 @@ def main(args):
     os.makedirs(save_last_path, exist_ok=True)
 
     ulmfit_tagger.summary()
-    ulmfit_tagger.compile(optimizer=optimizer_fn, loss=loss_fn, metrics=['sparse_categorical_accuracy'])
+    ulmfit_tagger.compile(optimizer=optimizer_fn, loss=loss_fn, metrics=[main_metric])
 
     # ##### This works only with fixed-length sequences:
-    loss_metric = 'binary_accuracy' if args.get('multilabel') else 'sparse_categorical_accuracy'
-    if args.get('save_every'):
-        ckpt_cbs = [tf.keras.callbacks.ModelCheckpoint(
-                    filepath = save_best_path,
-                    save_weights_only=True,
-                    save_freq=args['save_every'],
-                    monitor=loss_metric,
-                    mode='auto',
-                    save_best_only=True)]
-    else:
-        ckpt_cbs = []
-    ulmfit_tagger.compile(optimizer='adam', loss=loss_fn, metrics=[loss_metric])
-    ulmfit_tagger.fit(sequence_inputs, subword_labels, epochs=1, batch_size=args['batch_size'],
-                      callbacks=ckpt_cbs)
+    ulmfit_tagger.fit(sequence_inputs, subword_labels, epochs=args['num_epochs'], batch_size=args['batch_size'],
+                      callbacks=callbacks)
     ulmfit_tagger.save_weights(save_last_path)
 
     ##### For RaggedTensors and variable-length sequences we have to use the GradientTape ########x
