@@ -137,10 +137,11 @@ def main(args):
                                                                                  onehot_encode=True if args.get('multilabel') else False,
                                                                                  add_bos=True,
                                                                                  add_eos=True)
-    r = random.randint(0, len(tokenized)-1)
-    print(f"Sentence {r} and its tags:")
-    for t, n, l, el in zip(tokenized[r], numericalized[r], labels[r], encoded_labels[r]):
-        print(f"{t}\t{n}\t{l}\t{el}")
+    for _ in range(10):
+        r = random.randint(0, len(tokenized)-1)
+        print(f"Sentence {r} and its tags:")
+        for t, n, l, el in zip(tokenized[r], numericalized[r], labels[r], encoded_labels[r]):
+            print(f"{t}\t{n}\t{l}\t{el}")
 
     print(f"Generating {'ragged' if args.get('fixed_seq_len') is None else 'dense'} tensor inputs...")
     if args.get('fixed_seq_len') is not None:
