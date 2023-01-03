@@ -1,12 +1,14 @@
-fastai==2.4
+fastai==2.2.7
 nltk==3.6.2
 numpy==1.19.5
 pandas==1.2.4
+spacy==2.3.5
 sentencepiece==0.1.95
-sklearn==0.0
-tensorflow==2.4.1
+scikit-learn
+tensorflow==2.4.3
 tensorflow_hub==0.12.0
 tensorflow_text==2.4.3
+protobuf==3.20.0
 torch==1.7.1
 tqdm==4.61.1
 fastcore==1.3.20
