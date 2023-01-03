@@ -9,12 +9,14 @@ def ar_score(y_true, y_pred):
         'y_true': (y_true - 1.0)/4.0,
         'y_pred': (y_pred - 1.0)/4.0,
     })
+    unweighed_mae = mean_absolute_error(ds['y_true'], ds['y_pred'])
     wmae = ds \
         .groupby('y_true') \
         .apply(lambda df: mean_absolute_error(df['y_true'], df['y_pred']))
     print(wmae)
     wmae = wmae.mean()
     print(f"AR = {1 - wmae}")
+    print(f"AR_unweighed = {1-unweighed_mae}")
     return 1 - wmae
 
 if __name__ == "__main__":
