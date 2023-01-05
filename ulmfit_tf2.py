@@ -25,6 +25,10 @@ def get_recurrent_layers(config, SpatialDrop1DLayer):
     Whereas this will use a CuDNN kernel if a GPU is available:
     rnn1 = tf.keras.layers.LSTM(1152, kernel_initializer='glorot_uniform', return_sequences=True,
                                 name=f"AWD_RNN1")
+
+    Despite the above, we have encountered numerous warnings when using tf.saved_model.load() to
+    deserialize a SavedModel with the latter variant. We are therefore using the Keras RNN API
+    for serialization as well via the config['enforce_rnn_api_for_lstm'] flag.
     """
     rnn_layers = []
     for i in range(config['num_recurrent_layers']):
@@ -37,10 +41,16 @@ def get_recurrent_layers(config, SpatialDrop1DLayer):
                                         return_sequences=True,
                                         name=f"QRNN{i+1}")
         else:
-            layer = tf.keras.layers.LSTM(config['num_hidden_units'][i],
-                                         kernel_initializer='glorot_uniform',
-                                         return_sequences=True,
-                                         name=f"AWD_RNN{i+1}")
+            if config.get('enforce_rnn_api_for_lstm'):
+                layer = tf.keras.layers.RNN(tf.keras.layers.LSTMCell(config['num_hidden_units'][i],
+                                                                     kernel_initializer='glorot_uniform'),
+                                            return_sequences=True,
+                                            name=f"AWD_RNN{i+1}")
+            else:
+                layer = tf.keras.layers.LSTM(config['num_hidden_units'][i],
+                                             kernel_initializer='glorot_uniform',
+                                             return_sequences=True,
+                                             name=f"AWD_RNN{i+1}")
         drop = SpatialDrop1DLayer(0.3, name=f"rnn_drop{i+1}")
         rnn_layers.append((layer, drop))
     return rnn_layers
@@ -323,9 +333,10 @@ class ExportableULMFiTRagged(tf.keras.Model):
         self.lm_head_biases = tf.Variable(initial_value=lm_head_biases) if lm_head_biases is not None else None
         self.stlr_scheduler = scheduler
 
-    # def __call__(self, x):
-    #     rag_num = self.string_numericalizer(x)['numericalized']
-    #     return self.numericalized_encoder(rag_num)
+    @tf.function(input_signature=[tf.TensorSpec((None,), dtype=tf.string)])
+    def __call__(self, x):
+         rag_num = self.string_numericalizer(x)['numericalized']
+         return self.numericalized_encoder(rag_num)
 
     # Calling this signature from a hub.KerasLayer wrapper gives errors - since TF 2.4.1
     # tf.keras.layers.Input produces a KerasTensor, which is not compatible with tf.Tensor.

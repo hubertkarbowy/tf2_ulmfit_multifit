@@ -1,6 +1,7 @@
-__pycache__/
 *.log
 .idea/
 *.hdf5
 *.pyc
 __pycache__/**
+*.egg-info/
+dist/

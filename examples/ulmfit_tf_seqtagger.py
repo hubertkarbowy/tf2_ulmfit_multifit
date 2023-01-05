@@ -4,6 +4,10 @@ import os, random
 import readline
 
 import tensorflow as tf
+import pandas as pd
+
+from sklearn.metrics import classification_report
+from termcolor import colored
 
 from lm_tokenizers import LMTokenizerFactory
 from ulmfit_commons import check_unbounded_training, print_training_info, prepare_keras_callbacks
@@ -24,65 +28,9 @@ def read_labels(label_path):
     rev_label_map = {v:k for k,v in label_map.items()}
     return label_map, rev_label_map
 
-# def tokenize_and_align_labels(spmproc, train_jsonl, max_seq_len, no_label_symbol):
-#     """
-#     Performs Sentencepiece tokenization on an already whitespace-tokenized text
-#     and aligns labels to subwords
-#     """
 
-#     print(f"Tokenizing and aligning {len(train_jsonl)} examples...")
-#     if max_seq_len is not None:
-#         print(f"Note: inputs will be truncated to the first {max_seq_len - 2} tokens")
-#     tokenized = []
-#     numericalized = []
-#     labels = []
-#     for sent in train_jsonl:
-#         sentence_tokens = []
-#         sentence_ids = []
-#         sentence_labels = []
-#         for whitespace_token in sent:
-#             subwords = spmproc.encode_as_pieces(whitespace_token[0])
-#             sentence_tokens.extend(subwords)
-#             sentence_ids.extend(spmproc.encode_as_ids(whitespace_token[0]))
-#             sentence_labels.extend([whitespace_token[1]]*len(subwords))
-#         if max_seq_len is not None:
-#             # minus 2 tokens for BOS and EOS since the encoder was trained on sentences with these markers
-#             sentence_tokens = sentence_tokens[:max_seq_len-2]
-#             sentence_ids = sentence_ids[:max_seq_len-2]
-#             sentence_labels = sentence_labels[:max_seq_len-2]
-#         sentence_tokens = [spmproc.id_to_piece(spmproc.bos_id())] + \
-#                           sentence_tokens + \
-#                           [spmproc.id_to_piece(spmproc.eos_id())]
-#         sentence_ids = [spmproc.bos_id()] + sentence_ids + [spmproc.eos_id()]
-#         sentence_labels = [no_label_symbol] + sentence_labels + [no_label_symbol]
-#         tokenized.append(sentence_tokens)
-#         numericalized.append(sentence_ids)
-#         labels.append(sentence_labels)
-#     return tokenized, numericalized, labels
-
-
-def interactive_demo(args):
-    ############# settings ############
-    label_map = read_labels(args['label_map'])
-    spm_args = {'spm_model_file': args['spm_model_file'],
-                'add_bos': False,
-                'add_eos': False,
-                'lumped_sents_separator': '[SEP]'}
-    layer_config = {'qrnn': args.get('qrnn'),
-                    'num_recurrent_layers': args.get('num_recurrent_layers'),
-                    'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
-    spmproc = LMTokenizerFactory.get_tokenizer(tokenizer_type='spm_tf_text',
-                                               tokenizer_file=args['spm_model_file'],
-                                               add_bos=True, add_eos=True)  # bos/eos will need to be added manually
-    activation = 'sigmoid' if args.get('multilabel') else 'softmax'
-    ulmfit_tagger, hub_object = ulmfit_sequence_tagger(model_type=args['model_type'],
-                                                       pretrained_encoder_weights=None,
-                                                       spm_model_args=spm_args,
-                                                       fixed_seq_len=args.get('fixed_seq_len'),
-                                                       num_classes=len(label_map),
-                                                       activation=activation,
-                                                       layer_config=layer_config)
-    ulmfit_tagger.load_weights(args['model_weights_cp']).expect_partial()
+def interactive_demo(label_map, spmproc, ulmfit_tagger, seqtagger_weights_cp):
+    ulmfit_tagger.load_weights(seqtagger_weights_cp)
     print("Restored weights successfully")
     ulmfit_tagger.summary()
     readline.parse_and_bind('set editing-mode vi')
@@ -97,6 +45,34 @@ def interactive_demo(args):
         ret = tf.argmax(ulmfit_tagger.predict(subword_ids_tensor)[0], axis=1).numpy().tolist()
         for subword, category in zip(subwords, ret):
             print("{:<15s}{:>4s}".format(subword, label_map[category]))
+
+def evaluate(args, label_map, rev_label_map, spmproc, ulmfit_tagger):
+    eval_jsonl = r_jsonl(args['eval_jsonl'])
+    tokenized, numericalized, labels, encoded_labels = tokenize_and_align_labels(spmproc=spmproc,
+                                                                                 sents=eval_jsonl,
+                                                                                 max_seq_len=args.get('fixed_seq_len'),
+                                                                                 do_padding=True if args.get('fixed_seq_len') is not None else False,
+                                                                                 rev_label_map=rev_label_map,
+                                                                                 is_multilabel=args.get('multilabel'),
+                                                                                 onehot_encode=True if args.get('multilabel') else False,
+                                                                                 add_bos=True,
+                                                                                 add_eos=True)
+    ulmfit_tagger.load_weights(args['model_weights_cp']).expect_partial()
+    print("Restored weights successfully")
+    ulmfit_tagger.summary()
+    print(label_map)
+    model_preds = ulmfit_tagger.predict(numericalized)
+    y_preds = tf.argmax(model_preds, axis=2).numpy().flatten().tolist()
+    y_true = [x for y in encoded_labels for x in y]
+    assert len(y_true) == len(y_preds)
+    # from the first index, not zeroeth which is 'O' by convention:
+    report = classification_report(y_true, y_preds, labels=list(range(1, len(label_map))), target_names=list(label_map.values())[1:])
+    print(colored(report, 'blue'))
+    report_d = classification_report(y_true, y_preds, labels=list(range(1, len(label_map))), target_names=list(label_map.values())[1:], output_dict=True)
+    # report_d.pop('accuracy')
+    df = pd.DataFrame.from_dict(report_d, orient='index')
+    df.to_csv(args['out_path'], sep='\t')
+    print(f"Results saved to {args['out_path']}")
 
 
 def train_step(*, model, hub_object, loss_fn, optimizer, awd_off=None, x, y, step_info):
@@ -113,21 +89,48 @@ def train_step(*, model, hub_object, loss_fn, optimizer, awd_off=None, x, y, ste
 
 
 def main(args):
-    check_unbounded_training(args.get('fixed_seq_len'), args.get('max_seq_len'))
-    train_jsonl = r_jsonl(args['train_jsonl'])
     label_map, rev_label_map = read_labels(args['label_map'])
     spm_args = {'spm_model_file': args['spm_model_file'],
-                'add_bos': False,
-                'add_eos': False,
+                'add_bos': True if args.get('eval') or args.get('interactive') else False,
+                'add_eos': True if args.get('eval') or args.get('interactive') else False,
                 'lumped_sents_separator': '[SEP]',
                 'fixed_seq_len': args.get('fixed_seq_len')}
     layer_config = {'qrnn': args.get('qrnn'),
                     'num_recurrent_layers': args.get('num_recurrent_layers'),
                     'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
-    spmproc = LMTokenizerFactory.get_tokenizer(tokenizer_type='spm',
+    # bos / eos need to be added manually at training
+    spmproc = LMTokenizerFactory.get_tokenizer(tokenizer_type='spm_tf_text' if args.get('interactive') else 'spm',
                                                tokenizer_file=args['spm_model_file'],
                                                fixed_seq_len=args.get('fixed_seq_len'),
-                                               add_bos=False, add_eos=False)  # bos / eos will need to be added manually
+                                               add_bos=True if args.get('interactive') else False,
+                                               add_eos=True if args.get('interactive') else False)
+    # activation and loss functions:
+    if args.get('multilabel'):
+        activation = 'sigmoid'
+        loss_fn = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+    else:
+        activation = 'softmax'
+        loss_fn = RaggedSparseCategoricalCrossEntropy() \
+                  if args.get('fixed_seq_len') is None \
+                  else tf.keras.losses.SparseCategoricalCrossentropy()
+    ulmfit_tagger, hub_object = ulmfit_sequence_tagger(model_type=args['model_type'],
+                                                       pretrained_encoder_weights=None if args.get('eval') or args.get('interactive') else args['model_weights_cp'],
+                                                       spm_model_args=spm_args,
+                                                       fixed_seq_len=args.get('fixed_seq_len'),
+                                                       num_classes=len(label_map),
+                                                       activation=activation,
+                                                       layer_config=layer_config)
+    if args.get('eval'):
+        evaluate(args, label_map, rev_label_map, spmproc, ulmfit_tagger)
+        return
+    elif args.get('interactive'):
+        interactive_demo(label_map, spmproc, ulmfit_tagger, args['model_weights_cp'])
+        return
+    else:
+        raise NotImplementedError("Training function during porting...")
+
+    check_unbounded_training(args.get('fixed_seq_len'), args.get('max_seq_len'))
+    train_jsonl = r_jsonl(args['train_jsonl'])
     tokenized, numericalized, labels, encoded_labels = tokenize_and_align_labels(spmproc=spmproc,
                                                                                  sents=train_jsonl,
                                                                                  max_seq_len=args.get('fixed_seq_len'),
@@ -153,24 +156,6 @@ def main(args):
     if args.get('multilabel'):
         subword_labels = tf.cast(subword_labels, dtype=tf.bool) # no idea why tf.constant refuses to process one-hot arrays into bools directly...
 
-    # activation and loss functions:
-    if args.get('multilabel'):
-        activation = 'sigmoid'
-        loss_fn = tf.keras.losses.BinaryCrossentropy(from_logits=False)
-        # loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=False)
-    else:
-        activation = 'softmax'
-        loss_fn = RaggedSparseCategoricalCrossEntropy() \
-                  if args.get('fixed_seq_len') is None \
-                  else tf.keras.losses.SparseCategoricalCrossentropy()
-    ulmfit_tagger, hub_object = ulmfit_sequence_tagger(model_type=args['model_type'],
-                                                       pretrained_encoder_weights=args['model_weights_cp'],
-                                                       spm_model_args=spm_args,
-                                                       fixed_seq_len=args.get('fixed_seq_len'),
-                                                       num_classes=len(label_map),
-                                                       activation=activation,
-                                                       layer_config=layer_config)
-
     num_steps = (sequence_inputs.shape[0] // args['batch_size']) * args['num_epochs']
     print_training_info(args=args, x_train=sequence_inputs, y_train=subword_labels)
     if args.get('lr_scheduler') == 'stlr':
@@ -187,9 +172,10 @@ def main(args):
     print(f"Shapes - sequence inputs: {sequence_inputs.shape}, labels: {subword_labels.shape}")
 
 
-    save_best_path = os.path.join(args['out_path'], 'tagger_best')
+    if args.get('save_best'):
+        save_best_path = os.path.join(args['out_path'], 'tagger_best')
+        os.makedirs(save_best_path, exist_ok=True)
     save_last_path = os.path.join(args['out_path'], 'tagger_last')
-    os.makedirs(save_best_path, exist_ok=True)
     os.makedirs(save_last_path, exist_ok=True)
 
     ulmfit_tagger.summary()
@@ -222,9 +208,11 @@ def main(args):
 if __name__ == "__main__":
     argz = argparse.ArgumentParser()
     argz.add_argument("--train-jsonl", required=False, help="Whitespace-pretokenized and annotated input file")
+    argz.add_argument("--eval-jsonl", required=False, help="Whitespace-pretokenized and annotated evalset")
     argz.add_argument("--label-map", required=True, help="Path to a JSON file containing labels.")
     argz.add_argument("--multilabel", action='store_true', help="Whether tokens can be tagged by more than one entity "
                                                                 "(sigmoid, not softmax)")
+    argz.add_argument("--eval", action='store_true', help="Run the script in evaluation mode")
     argz.add_argument("--model-weights-cp", required=True, help="Training: path to *weights* (checkpoint) of "
                                                                 "the generic model (not the SavedModel/HDF5 blob!)."
                                                                 "Evaluation/Interactive: path to *weights* produced "
@@ -247,14 +235,15 @@ if __name__ == "__main__":
     argz.add_argument("--lr-scheduler", choices=['stlr', '1cycle', 'constant'], default='constant', help="Learning rate"
                       "scheduler (slanted triangular, one-cycle or constant LR)")
     argz.add_argument("--interactive", action='store_true', help="Run the script in interactive mode")
-    argz.add_argument("--save-every", type=int, help="How often to save a checkpoint (number of steps)")
-    argz.add_argument("--out-path", default="ulmfit_tagger", help="Training: Checkpoint name to save every N steps")
+    argz.add_argument("--save-best", action='store_true', help="Save the best checkpoint")
+    argz.add_argument("--out-path", required=True, help="Training: Checkpoint name to save every N steps, " \
+                                                        "Eval: tsv file to store the results, Demo: pass '/dev/null'")
     argz = vars(argz.parse_args())
     if all([argz.get('max_seq_len') and argz.get('fixed_seq_len')]):
         print("You can use either `max_seq_len` with RaggedTensors to restrict the maximum sequence length, or"
               "`fixed_seq_len` with dense tensors to set a fixed sequence length with automatic padding, not both.")
         exit(1)
-    if argz.get('train_jsonl') is None and argz.get('interactive') is None:
+    if argz.get('train_jsonl') is None and argz.get('interactive') is None and argz.get('eval') is None:
         print("Please provide either a data file for training / evaluation or run the script with --interactive switch")
         exit(0)
     if argz.get('interactive') is True:

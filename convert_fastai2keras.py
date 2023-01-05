@@ -19,8 +19,10 @@ def main(args):
     exp_name = os.path.splitext(os.path.basename(args['pretrained_model']))[0]
     layer_config = get_rnn_layers_config({
         'qrnn': args.get('qrnn'),
-        'num_recurrent_layers': args.get('num_recurrent_layers')
+        'num_recurrent_layers': args.get('num_recurrent_layers'),
+        'enforce_rnn_api_for_lstm': True
     })
+
     lm_num, encoder_num, outmask_num, spm_encoder_model = save_as_keras(state_dict=state_dict,
                                                                         exp_name=exp_name,
                                                                         save_path=os.path.join(args['out_path'], 'keras_weights'),
@@ -44,6 +46,7 @@ def main(args):
                                 'string_encoder': exportable.string_encoder,
                                 'spm_processor': exportable.string_numericalizer}
         tf.saved_model.save(exportable, os.path.join(args['out_path'], 'saved_model'), signatures=convenience_signatures)
+        # tf.keras.models.save_model(exportable, os.path.join(args['out_path'], 'saved_model'), signatures=convenience_signatures)
     print(f"Exported SavedModel successfully (qrnn={layer_config['qrnn']}).")
     os.makedirs(os.path.join(args['out_path'], 'fastai_model'), exist_ok=True)
     shutil.copy2(args['pretrained_model'], os.path.join(args['out_path'], 'fastai_model/'))
