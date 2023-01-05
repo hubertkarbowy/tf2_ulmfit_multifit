@@ -1,4 +1,13 @@
-# ULMFiT for Tensorflow 2.0
+# QRNN (Quasi-Recurrent Neural Network) and ULMFiT for Tensorflow 2.x
+
+Since the arrival of BERT, recurrent neural networks have fallen out of fashion in Natural Language Processing. In practical applications, however, there are still many use cases where a much lighter recurrent architecture is preferrable over the Transformer due to e.g. faster inference times or constraints on the computing power. This repo contains the implementation of two such recurrent architectures:
+
+* **ULMFiT** - which is basically LSTM with improvements to the regularization techniques and a triangular learning rate scheduler,
+* **MultiFIT** - the evolution of the ULMFiT model in which LSTM cells were replaced by Quasi-Recurrent cells and a One-cycle learning rate scheduler was used.
+
+Both architectures were originally implemented in the FastAI framework which itself is build over PyTorch. However, the implementations were poorly documented, examples were scarce and adaptation to custom data was challenging. FastAI's text processing pipeline is also rather inflexible. Subjectively, the two biggest issues are the difficulty in using subword tokenization and the baking in as defaults of some rather arcane transformations (for example, capital letters are downcased, but a `\\xxmaj` symbol is inserted before to denote capitalization). These issues can for sure be overcome by reverse-engineering FastAI code where the documentation remains silent. 
+
+Instead, a cleaner implementation of both architectures, less tightly coupled with the data preprocessing techniques is provided here for Tensorflow, which is also more familiar to the Machine Learning community and has a bigger user base than FastAI. 
 
 Table of contents
 
@@ -6,46 +15,169 @@ Table of contents
 
 
 
-## 1. Introduction (and why we still need FastAI)
+## 1. Introduction
 
-This repository contains scripts used to pretrain ULMFiT language models in the FastAI framework, convert the result to a Keras model usable with Tensorflow 2.0, and fine-tune on downstream tasks in Tensorflow.
+### 1.1. Installation and quick start
 
-Please note that whereas you can train any encoder head (document classification, sequence tagging, encoder-decoder etc.) in Tensorflow, the pretraining and fine-tuning of a generic language model is still better done in FastAI. This is because FastAI was written by ULMFiT's authors and contains all the important implementation details that might be omitted in the paper. Porting all these details to another framework is a big challenge. But having the encoder weights trained in a proper way and available in TF still allows you to take advantage of transfer learning for downstream tasks, even if your hyperparameters are suboptimal.
+No installation is required if you are planning to use only the [pretrained encoders](#2.-pretrained-models-and-corpora) from SavedModel files. Download one of them and extract it to a directory:
 
-Basically, ULMFiT is just 3 layers of a unidirectional LSTM network plus many regularization methods. We were successful in porting the following regularization techniques to TF2:
+```
+$ mkdir sample_model
+$ wget https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EWtQ0LyOzfBNoyprcId2D6kBpD2zkjK9buTpjzOztSBIcw?download=1 -O sample_model/m.tgz
+$ tar xvfz ./sample_model/m.tgz -C ./sample_model/
+```
+
+Then, in Python run:
+
+```
+import tensorflow as tf
+import tensorflow_text # needed to register sentencepiece graph operations
+
+model = tf.saved_model.load('./sample_model/')
+sents = tf.constant(['the limits of my language mean the limits of my world'])
+model.signatures['string_encoder'](sents)
+
+{'output': <tf.Tensor: shape=(1, 70, 400), dtype=float32, numpy=
+ array([[[-0.06846653,  0.03071258,  0.04870525, ...,  0.04809854,
+           0.159233  , -0.02486314],
+         [-0.09425692,  0.11809141,  0.00196292, ...,  0.06615587,
+           0.12720759,  0.14610538],
+         [-0.06734478,  0.02118873,  0.08690275, ..., -0.26142147,
+          -0.10768991,  0.14759885],
+         ...,
+         [ 0.02605111, -0.01863609,  0.04656828, ..., -0.0163744 ,
+          -0.1731047 , -0.1022887 ],
+         [ 0.02605111, -0.01863609,  0.04656828, ..., -0.0163744 ,
+          -0.1731047 , -0.1022887 ],
+         [ 0.02605111, -0.01863609,  0.04656828, ..., -0.0163744 ,
+          -0.1731047 , -0.1022887 ]]], dtype=float32)>,
+ 'numericalized': <tf.Tensor: shape=(1, 70), dtype=int32, numpy=
+ array([[   2,   10, 6549,   28, 1575, 1240, 1573,   10, 6549,   28, 1575,
+          778,    3,    1,    1,    1,    1,    1,    1,    1,    1,    1,
+            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
+            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
+            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
+            1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
+            1,    1,    1,    1]], dtype=int32)>,
+ 'mask': <tf.Tensor: shape=(1, 70), dtype=bool, numpy=
+ array([[ True,  True,  True,  True,  True,  True,  True,  True,  True,
+          True,  True,  True,  True, False, False, False, False, False,
+         False, False, False, False, False, False, False, False, False,
+         False, False, False, False, False, False, False, False, False,
+         False, False, False, False, False, False, False, False, False,
+         False, False, False, False, False, False, False, False, False,
+         False, False, False, False, False, False, False, False, False,
+         False, False, False, False, False, False, False]])>}
+```
+
+The token vectors are under the `output` key. As you can see, the input sentences are automatically tokenized into wordpieces, converted to IDs ("numericalized") and padded to a sequence length of 70. There is quite a lot going on here and we'll explain the details later in this guide.
+
+To run the examples for document classification, sequence tagging etc. you need to install this repo via pip:
+
+```
+TBC
+```
+
+Note, however, that the requirements **DO NOT INCLUDE** the dependencies needed for FastAI-related scripts - these are so outdated that including them would prevent any use of this package in a modern project. If needed (see next section), you will need to install them manually probably in a separate environment.
+
+
+
+### 1.2. But do we still need FastAI? And why such an antique version?
+
+TLDR: Yes, but only if you want to pretrain a Language Model from scratch.
+
+FastAI is still needed for pretraining a language model from scratch or fine-tuning it to a specific domain. It is, however, not needed if you are happy with the models pretrained on the general languages corpora listed below and your only concern is the target task such as document classification or sequence tagging - in this case Tensorflow alone will suffice.
+
+Why is that? Essentially because ULMFiT and MultiFiT architectures were developed by FastAI authors and associates and the training optimizations used are not easily portable to another machine learning framework. In particular, FastAI was the only framework that not only natively supported QRNNs, but also had custom CUDA code that provided acceleration on a GPU. Sadly, in FastAI v. 2.4 "*QRNN module [was] removed, due to incompatibility with PyTorch 1.9, and lack of utilization of QRNN in the deep learning community.*" (from their release notes). For quasi-recurrent networks, therefore, we are stuck with those old libraries and not much can be done about it.
+
+The classes in this repo are built on top of [Keras RNN API](https://www.tensorflow.org/guide/keras/rnn). This allows AWD LSTM / QRNN cells to be used as a drop-in replacement for LSTM or GRU cells available in Keras. However, unlike the latter two, there is no CUDA-optimized version for a QRNN - this would require writing a new kernel and making it work with TF, which is far from trivial. That is quite a drawback if one was to train a language model from scratch - the code in old FastAI version optimized for that task runs by several orders of magnitude faster than generic CUDA kernels used by Tensorflow. For language modelling the data runs into gigabytes, so the acceleration is a must.
+
+However, when using transfer learning, models for downstream tasks such as sentiment analysis or named entity recognition can be trained to acceptable performance on much smaller volumes of data. Therefore, we use FastAI to pretrain only the language model (the encoder), then we export its weights and read them into and identically structured Keras equivalent. From this point, we can run the far less computation-intensive downstream task with only generic CUDA optimizations provided by Tensorflow and still finish the training in reasonable time.
+
+The script used to pretrain ULMFiT and MultiFiT language models in FastAI is called [convertfastai2keras.py](convertfastai2keras.py) - its usage and conversion to Keras is discussed below.
+
+
+
+### 1.3. Scope of reimplementation
+
+We were successful in porting the following regularization and training techniques used in ULMFiT and MultiFiT to TF2:
 
 * encoder dropout
 * input dropout
 * RNN dropout
-* weight dropout (AWD) - must be called manually or via a KerasCallback
-* learning rate schedulers: slanted triangular learning rates (available as a subclass of  `tf.keras.optimizers.schedules.LearningRateSchedule`) and one-cycle policy together with the learning rate finder ([implementations by Andrich van Wyk](https://www.kaggle.com/avanwyk/tf2-super-convergence-with-the-1cycle-policy)).
+* weight dropout (AWD, must be called manually or via a KerasCallback) for LSTM and zoneout for QRNN
+* slanted triangular learning rates (available as a subclass of  `tf.keras.optimizers.schedules.LearningRateSchedule`) and one-cycle policy together with the learning rate finder ([implementations by Andrich van Wyk](https://www.kaggle.com/avanwyk/tf2-super-convergence-with-the-1cycle-policy)).
 
-The following techniques are NOT ported:
+The following techniques were not ported:
 
-* gradual unfreezing - you can very easily control this yourself by setting the `trainable` attribute on successive Keras layers
-* mysterious calls to undocumented things in FastAI like `rnn_cbs(alpha=2, beta=1)`
+* gradual unfreezing - but you can very easily control this yourself by setting the `trainable` attribute on successive Keras layers either manually or by writing a simple callback.
+* some mysterious undocumented callbacks in FastAI such as `rnn_cbs(alpha=2, beta=1)`
+* batch normalization
 
 
 
-## 2. Just give me the pretrained models
+## 2. Pretrained models and corpora
 
-Sure. You can download the cased/uncased versions for English and Polish in three different formats and two vocabulary sizes:
+Several pretrained models for English and Polish are made available in the following formats:
 
-* **TF 2.0 SavedModel** - available via Tensorflow Hub as a standalone module. This is great because you don't need any external code (including this repo) to build your own classifiers.
-* **Keras weights** - you can build a Keras encoder model using code from this repo and restore the weights via `model.load_weights(...)`. This can be handy if you need to tweak some parameters that were fixed by the paper's authors.
-* **FastAI .pth** **state_dict** - the original file which you can convert to a TF 2.0 models with the `convert_fastai2keras.py` script.
+* **TF 2.0 SavedModel** - these are self-contained, standalone binaries that contain serialized assets, graphs, functions and weights for the three components needed to obtain token vectors produced by the language model:
 
-All our models were trained only on Wikipedia (the datasets were very similar, though not identical, to Wikitext-103) and use Sentencepiece to tokenize input strings into subwords.
+  * Sentencepiece tokenizer and subword vocabulary models
+  * Numericalization, i.e. the transformation of word pieces into index IDs
+  * The encoder itself
 
-Here are the links:
+  This is probably the easiest format to use since you don't need any code from this repo. However, it comes with certain limitations, the most significant of which is that the sequence length is fixed at 70 tokens and that the `<s>` and `</s>` symbols are added automatically for each textual input.
 
-| Model                | TF 2.0 SavedModel                                            | Keras weights                                                | FastAI model                                                 | Sentencepiece files                                          |
-| -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| **en-sp35k-cased**   | [TFHub page](https://tfhub.dev/edrone/ulmfit/en/sp35k_cased/1) and [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_cased/saved_model/enwiki100_20epochs_toks_35k_cased.tar.gz) | [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_cased/keras_weights/enwiki100_20epochs_toks_35k_cased_keras.tar.gz) | [.pth file](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_cased/fastai_model/enwiki100_20epochs_toks_35k_cased.pth) | [model](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_cased/spm_model/enwiki100-toks-sp35k-cased.model), [vocab](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_cased/spm_model/enwiki100-toks-sp35k-cased.vocab) |
-| **en-sp35k-uncased** | [TFHub page](https://tfhub.dev/edrone/ulmfit/en/sp35k_uncased/1) and [.tar.gz archive]( https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_uncased/saved_model/enwiki100_20epochs_toks_35k_uncased.tar.gz) | [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_uncased/keras_weights/enwiki100_20epochs_toks_35k_uncased_keras.tar.gz) | [.pth file](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_uncased/fastai_model/enwiki100_20epochs_toks_35k_uncased.pth) | [model](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_uncased/spm_model/enwiki100-toks-sp35k-uncased.model), [vocab](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/enwiki100_20epochs_toks_35k_uncased/spm_model/enwiki100-toks-sp35k-uncased.vocab) |
-| **pl-sp35k-cased**   | [TFHub page](https://tfhub.dev/edrone/ulmfit/pl/sp35k_cased/1) and [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_35k_cased/saved_model/plwiki100_20epochs_toks_35k_cased.tar.gz) | [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_35k_cased/keras_weights/plwiki100_20epochs_toks_35k_cased_keras.tar.gz) | [.pth file](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_35k_cased/fastai_model/plwiki100_20epochs_toks_35k_cased.pth) | [model](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_35k_cased/spm_model/plwiki100-toks-sp35k-cased.model), [vocab](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_35k_cased/spm_model/plwiki100-toks-sp35k-cased.vocab) |
-| **pl-sp50k-cased**   | [TFHub page](https://tfhub.dev/edrone/ulmfit/pl/sp50k_cased/1) and [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_cased/saved_model/plwiki100_20epochs_toks_50k_cased.tar.gz) | [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_cased/keras_weights/plwiki100_20epochs_toks_50k_cased_keras.tar.gz) | [.pth file](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_cased/fastai_model/plwiki100_20epochs_toks_50k_cased.pth) | [model](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_cased/spm_model/plwiki100-toks-sp50k-cased.model), [vocab](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_cased/spm_model/plwiki100-toks-sp50k-cased.vocab) |
-| **pl-sp50k-uncased** | [TFHub page](https://tfhub.dev/edrone/ulmfit/pl/sp50k_uncased/1) and [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_uncased/saved_model/plwiki100_20epochs_toks_50k_uncased.tar.gz) | [.tar.gz archive](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_uncased/keras_weights/plwiki100_20epochs_toks_50k_uncased_keras.tar.gz) | [.pth file](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_uncased/fastai_model/plwiki100_20epochs_toks_50k_uncased.pth) | [model](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_uncased/spm_model/plwiki100-toks-sp50k-uncased.model), [vocab](https://d3vhsxl1pwzf0p.cloudfront.net/ava/ulmfit/plwiki100_20epochs_toks_50k_uncased/spm_model/plwiki100-toks-sp50k-uncased.vocab) |
+* **Keras weights** - these are checkpoint files that can be restored via `model.load_weights(...)` on a Keras object instantiated using code from this repo. This can be handy if you need to tweak some parameters that were fixed by the paper's authors, for example add or remove some dropout layers.
+
+* **FastAI .pth** **state_dict** - the file containing the encoder trained using FastAI as explained above. Both the SavedModel and Keras weights formats were generated from this file using the `convert_fastai2keras.py` script.
+
+Here is the complete list of available pretrained models:
+
+<u>**English (trained on the Wikitext corpus)**</u>
+
+All models were trained on a corpus similar to [Wikitext-103](https://www.salesforce.com/products/einstein/ai-research/the-wikitext-dependency-language-modeling-dataset/) with a subword dictionary of 35,000 tokens. A fresh Wikipedia dump was prepared using the [wikiextractor](https://github.com/attardi/wikiextractor) package, then the output was sentence-tokenized and underwent some further minor preprocessing using the `01_cleanup.py` script. If needed, the corpus files (split into training, validation and test sets) can be downloaded from these links:
+
+* [uncased](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EbVZzpeXKO1BqQjBtUfxXTgBee7L6746EazGph4k2-cSHQ?download=1)
+* [cased](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EShjqqOiiihMgo33mL5iuO8Bw9Dfq_OG-laVV4di86fcyA?download=1)
+
+| Model                         | TF 2.0 SavedModel                                            | Keras weights                                                | FastAI v2.2.7 model                                          | Sentencepiece files                                          |
+| ----------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **ulmfit-en-sp35k-cased**     | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EWtQ0LyOzfBNoyprcId2D6kBpD2zkjK9buTpjzOztSBIcw?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ERWfQcH7Sj1IqViKl2-ygRsBxryv7FfJ-rVcpPWkjaOt6g?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EdZPByYtSp5Jkfa1MLRKjPcBJiQ3XSe94BBc56I8Lcmn-g?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EZSXfz0XKf5Jlc9nqj2kt50BZiLlFLfR4cwZh4euDEfMCw?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EUxMYcwQ4gpPjR32V1MR9BUBdGYgHRKS7w7daM0ebkwc7A?download=1) |
+| **ulmfit-en-sp35k-uncased**   | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EZtBWV10etNKkqx3YXGDdqMBiIlAGNEKNuxCrSPZsqoKeA?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EaTWKKlapRBOg88am0Z0j6sBleNntd_ETAEo_E8l18E8hA?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/Ef30f7aZTGVOoqja4BIchDUBz60fLZj8Gpw-ttS9rZVZjg?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EYqvtu342mlNgCoO6O9_S1ABfN-dv6uQNI8aO5zsj0MT9g?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EZeSclPihexKjXo4dMiLxTkBFBQPCQF6DsAmI-GYB0aT1A?download=1) |
+| **multifit-en-sp35k-cased**   | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EY9Q05bd695LkfpVUrnGfXcB1yMiltINkwuRM_8FKSk2mQ?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ESn5s-KMmAxOnQl8TJRwKG8BAPa1zd40oi5e5Vne4lbRHA?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EaIpprBIfypKtosmuQbFU0UBTXN5okDRc096WHsy6gHFIw?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EVdQVGOSgV5MujoBWVb_4EoB1CgIbFsoxvnKz299dF8jAg?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EbAvZwe9tOlCsiwA0cOsTJQBa6_Y-1UkXawWTe2iozk1Jg?download=1) |
+| **multifit-en-sp35k-uncased** | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EQABorkyinVBi3OAJHtQjGMBD4mWPSd4-tN8z7iHUvm0hQ?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EToP5dl5HpdLudZbleCM4A0BxJ8nFLMAPtCRm204Bx8tnQ?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EYYr_Q3r-kJNhmb-wbRzIxIBpFz2edCSucXjXUIpKqW_JA?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EX8noqB8teZAm5JGmYViAq4BR_zjAyJ6PjUOtWqnD5g2dw?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ERAQq9qQu5RKvk-uf37mVDcBQMcUSFB2m83z-fUZWXvP8A?download=1) |
+
+
+
+**<u>Polish (trained on the Wikitext corpus):</u>**
+
+These models are available with subword dictionary sizes of 35,000 and 50,000 tokens (both cased). The corpus links are:
+
+* [cased](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EWyV047JBwBCvUDjKVCwNKEB2yeX5RRn2t2Qq6w4XBoS_w?download=1)
+* [uncased](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EQoS9MIBU8NEk2yzya_kT8wB4Ei7wN5WZ_zxw-khEHkUZA?download=1) (no models provided)
+
+| Model                       | TF 2.0 SavedModel                                            | Keras weights                                                | FastAI v2.2.7 model                                          | Sentencepiece files                                          |
+| --------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **ulmfit-pl-sp35k-cased**   | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EVREU5kXGVNIqr6v3T5jL0UBsT5ujoKcOiW2dsZFUUnUNQ?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EcYa-n6JFdxBnnRVSpcKvO4B6KsJrK50ET_HvJI8mRXfiA?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ESHg6JCkiHJCqeTOP6lY7OABae72sXp5p53XU1dlMHCqKw?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ET57COd7jkhBiKC_Nmc4zLMB_v7pB4PdaHTRRyNda3btJQ?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/Efq36t20Yx5Bj1vr-puCmZgB33KIoNKKz7JphkS5J4rbXA?download=1) |
+| **ulmfit-pl-sp50k-cased**   | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EfEX_YUu1q5Cglf_vUwDBHkB-fM0N5q-pvbnfqIVxwvSzQ?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ETrxh1xqouJPvfVlkoINmycBAeXxMK0RMfVS5940JMw_KA?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ERJpDTyFeWdFkIRDIFdMurQBnJXYmIBnCYyt_nOFoqexzQ?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EaQmC0qDqzhAkcJXlbRU8kIBWHa0NUUw_sMnv9xnOAYnQw?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EXZwxnBhVs5BnTdrOJf1CKABrH61ElRYp-xL5R2Yq6Y2BQ?download=1) |
+| **multifit-pl-sp35k-cased** | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EXC9yxntr8pJrgFbyQOTS0IBXQRvRLlGbem8FM4wSiulfw?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ESKYx7Th-XdMr0z3ybmJXXcB8P6ammwcDWYzyzuE4jjSCg?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EVM6Q4unNhJChjA5xy_sNR8BQAm3y_1UMhyRVlhqWgKSPA?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ESJisYJx8odMhafXckwJ51sBcRzh1xqcMt2juBu_mich9Q?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EZ18YU53dKBFhFmFLzd1NvYBr5ZDOPPM323qYGMeKSy2ew?download=1) |
+| **multifit-pl-sp50k-cased** | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ESR2JOC2tXpJicvrgsqEIoMB2H7LC3ZKtzMorUAQVRk_8Q?download=1) | [.tar.gz archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ERMANByB4zRAhIr0Yh1bP5AB9XV9y11ZlcOzn5G64cdexQ?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EY9RsoswwzJJocMJHLiqWnMBMavZ_DNOXIGw32CrUuhA1Q?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EQtzbCmLe_BIrhaOWf5fWewBQzwE0-F_KSdafEWuDTQRKg?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EUxnS4EFePNBrWUtCIDmdWkBofrj4bQ0JJzUGUlGFDM4Wg?download=1) |
+
+
+
+**<u>Polish (trained on the Poleval-2018 corpus):</u>**
+
+Same dictionary parameters as for the Wikitext models. The PolEval-2018 corpus can be downloaded from their [official website](http://2018.poleval.pl/index.php/tasks/) and is already sentence-tokenized.
+
+| Model                       | TF 2.0 SavedModel                                            | Keras weights                                                | FastAI v2.2.7 model                                          | Sentencepiece files                                          |
+| --------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **ulmfit-pl-sp35k-cased**   | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ERzqLNbvjmlAo3TeK2UDvr4BTe7SIIioLSUQ30RtLlEUxA?download=1) | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EVRtfGBRkLFAh68ECJKI88MBY0GAV3XevWzVhZIO2G0gwA?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EYtWHSv3xAxItoYVRBeyxQUB6puwM5N9hgKQF7C27PiPPQ?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EQqAYSzbE15JngjXIh4G_yYBQGcXkTEVwWwKcDNUpjA3_Q?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EQEonLZ8S2RJvyUQG_J1DKABOfEqcTqbtbdaIawV8Nj1aQ?download=1) |
+| **ulmfit-pl-sp50k-cased**   | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EYoJFKwVI9tEpdBsoTqwDxABo3MtLIOOUitzWLSJzntITw?download=1) | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EeXs-LRWM7RFoMiSadyQTqUBX9i_D_PBv9tbWxG_ukYZgw?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EciL48bD-9hJhWDX90doSZQBv064Gm5RMHkj_pilPAi70w?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EQoEb_Y5pLtPl_DkM6Ogl7cBOPYxbwZ3kSpPVpJ07iPc4Q?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EXsHSmi7UgNArvB6h5iznjcBBKiJv4KOYSZQV2hvHGK98w?download=1) |
+| **multifit-pl-sp35k-cased** | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EYeWxutR2NNHvDW1oXS_M8IBsHfMk-iZrQLhzr9_ATkn-A?download=1) | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EWlVBXPCOWVCjkgbuNLqOgUBJxp1-1mYq0Xkba2Sgh4oUQ?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EROlxuwJAn1FpPy-XoVeDQMBL0_5Q-ukTUR_42UExq6TqA?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EUEb-y_irUVFnGnoVz7BPiwBJWfmVAhtqmeLBNoFPOu8uw?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EXQ9Wb6tqnNAhXhxjibByYUBWbMPuk8pEDNMzVrUsxIadg?download=1) |
+| **multifit-pl-sp50k-cased** | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/ESIk07vEc-dPgYzjDqbuRPoB6OXDZSMxzOWA9HLBXU433A?download=1) | [.tar.gz.archive](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/Ea9Qh92jbttAuWemMaUcM10BF71SJZIb046nIND70srlKA?download=1) | [.pth file](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EUALi3cbCKxOkU1lqdn62QIBqHjS72SXKa7ztR89bjAAUg?download=1) | [model](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EXTmciLr8CRMmsOS-h4UXCwBlHiuREkITTiQz44Ot52XqQ?download=1), [vocab](https://wsisizwit-my.sharepoint.com/:u:/g/personal/karbowy_office_wit_edu_pl/EWR6JtxrdRZPnbmV6sT57oYBUlj8kQ91bBjJ4OmIrwpuGA?download=1) |
+
+
 
 
 
@@ -57,14 +189,14 @@ The encoder transforms batches of strings into sequences of vectors representing
 
 ### 3.1. Tokenization and numericalization
 
-We use [Sentencepiece](https://github.com/google/sentencepiece) to tokenize the input text into subwords. To convert tokens into their IDs (numericalization) you can use the downloaded vocabulary files directly with Python's `sentencepiece` module or its Tensorflow wrapper available in `tensorflow_text` as described in [this manual](https://www.tensorflow.org/tutorials/tensorflow_text/subwords_tokenizer). In line with FastAI's implementation, our vocabularies contain the following special indices:
+Unlike FastAI, we use [Sentencepiece](https://github.com/google/sentencepiece) to tokenize the input text into subwords. To convert tokens into their IDs (numericalization) you can use the downloaded vocabulary files directly with Python's `sentencepiece` module or its Tensorflow wrapper available in `tensorflow_text` as described in [this manual](https://www.tensorflow.org/tutorials/tensorflow_text/subwords_tokenizer). Our vocabularies contain the following special symbols:
 
 * 0 - `<unk>`
-* 1 - `<pad>` (note that this is unlike Keras where the default padding index is `0`)
-* 2 - `<s>` (BOS)
-* 3 - `</s>`(EOS)
+* 1 - `<pad>` (please note the important difference: Keras uses `0` as the default padding index, not 1. Models in this repo are already configured to have a mask on `1` propagated throughout the layers [as explained in this article](https://www.tensorflow.org/guide/keras/masking_and_padding), but should you choose to reconfigure the layers or use custom heads over the encoder, this needs to be taken into account.
+* 2 - `<s>` - beginning of sentence
+* 3 - `</s>`- end of sentence
 
-We also provide a Keras layer object called `SPMNumericalizer` which you can instantiate with a path to the `.spm` file. This is convenient if you just need to process a text dataset into token IDs without worrying about the whole mechanics of vocabulary building:
+We also provide a Keras layer object called `SPMNumericalizer` which you can instantiate with a path to the `.model` file. This is convenient if you just need to process a text dataset into token IDs without worrying about the whole mechanics of vocabulary building:
 
 ```
 import tensorflow as tf
@@ -731,6 +863,15 @@ Perplexity = 181.9491424560547 (on 36864 sequences (stateful!)
 * [Universal Language Model Fine-Tuning (ULMFiT): State-of-the-Art in Text Analysis](https://humboldt-wi.github.io/blog/research/information_systems_1819/group4_ulmfit/#ttc) - analysis by researchers from the Humboldt University in Berlin
 * [Understanding building blocks of ULMFiT](https://blog.mlreview.com/understanding-building-blocks-of-ulmfit-818d3775325b) - blog post with detailed description and examples of dropouts used in the ULMFiT model
 
-The code in this repo is by Hubert Karbowy. Contact me at h.karbowy@edrone.me if you find bugs or need support. Special thanks to Krzysztof Trojanowski (k.trojanowski@edrone.me) for valuable hints and suggestions.
+The code in this repo is by Hubert Karbowy and was forked from ....  Many thanks to my employer, edrone, for providing GPU machines for training and disk space for model hosting.
 
-This project was partially funded by a grant from Polish National Centre For Research and Development.
+Contact me at [hk@hubertkarbowy.pl](hk@hubertkarbowy.pl) if you find bugs or need support.
+
+
+
+## 7. Smietniczek
+
+This can be modified by running the `convert_fastai2keras.py` script again and setting the `--fixed-seq-len` parameter to a different value. It is also possible to get models with variable number of tokens by omitting this parameter - in this case the outputs will need further processing into [RaggedTensors](https://www.tensorflow.org/api_docs/python/tf/RaggedTensor), which is explained below.
+
+
+
