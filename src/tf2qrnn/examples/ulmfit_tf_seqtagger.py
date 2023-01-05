@@ -9,11 +9,11 @@ import pandas as pd
 from sklearn.metrics import classification_report
 from termcolor import colored
 
-from lm_tokenizers import LMTokenizerFactory
-from ulmfit_commons import check_unbounded_training, print_training_info, prepare_keras_callbacks
-from ulmfit_tf2 import STLRSchedule, OneCycleScheduler, RaggedSparseCategoricalCrossEntropy, apply_awd_eagerly
-from ulmfit_tf2_heads import ulmfit_sequence_tagger
-from pretraining_utils.sequence_utils import tokenize_and_align_labels
+from ..lm_tokenizers import LMTokenizerFactory
+from ..commons import check_unbounded_training, print_training_info, prepare_keras_callbacks
+from ..encoders import STLRSchedule, OneCycleScheduler, RaggedSparseCategoricalCrossEntropy, apply_awd_eagerly
+from ..heads import ulmfit_sequence_tagger
+from ..pretraining_utils.sequence_utils import tokenize_and_align_labels
 
 # DEFAULT_LABEL_MAP = {0: 'O', 1: 'B-N', 2: 'I-N'}
 

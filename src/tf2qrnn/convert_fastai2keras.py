@@ -7,9 +7,9 @@ import tensorflow as tf
 from fastai.basics import *
 from fastai.callback.all import *
 from fastai.text.all import *
-from fastai_lm_utils import save_as_keras
-from ulmfit_tf2 import ExportableGenericRecurrentLM, ExportableULMFiT, ExportableULMFiTRagged, STLRSchedule
-from ulmfit_commons import get_rnn_layers_config
+from .fastai_lm_utils import save_as_keras
+from .encoders import ExportableGenericRecurrentLM, ExportableULMFiT, ExportableULMFiTRagged, STLRSchedule
+from .commons import get_rnn_layers_config
 
 
 def main(args):
@@ -46,7 +46,6 @@ def main(args):
                                 'string_encoder': exportable.string_encoder,
                                 'spm_processor': exportable.string_numericalizer}
         tf.saved_model.save(exportable, os.path.join(args['out_path'], 'saved_model'), signatures=convenience_signatures)
-        # tf.keras.models.save_model(exportable, os.path.join(args['out_path'], 'saved_model'), signatures=convenience_signatures)
     print(f"Exported SavedModel successfully (qrnn={layer_config['qrnn']}).")
     os.makedirs(os.path.join(args['out_path'], 'fastai_model'), exist_ok=True)
     shutil.copy2(args['pretrained_model'], os.path.join(args['out_path'], 'fastai_model/'))
@@ -56,14 +55,18 @@ def main(args):
     shutil.copy2(args['spm_model_file'].replace(".model", ".vocab"), os.path.join(args['out_path'], 'spm_model/'))
     print("SPM model copied. Conversion complete.")
 
+
 if __name__ == "__main__":
-    argz = argparse.ArgumentParser(description="Loads weights from an ULMFiT .pth file trained using FastAI into a Keras model.\n" \
-                                               "This script will produce four subdirectories: 1) Keras weights, 2) SavedModel, 3) SPM model, 4) FastAI model")
-    argz.add_argument("--pretrained-model", required=True, help="Path to a pretrained FastAI model (.pth)")
-    argz.add_argument("--qrnn", required=False, action='store_true', help="The .pth file contains a QRNN model")
-    argz.add_argument("--num-recurrent-layers", required=False, type=int, help="Number of recurrent layers")
-    argz.add_argument("--out-path", required=True, help="Output directory where the converted TF model weights will be saved")
-    argz.add_argument("--fixed-seq-len", type=int, required=False, help="(SavedModel only) Fixed sequence length. If unset, the RNN encoder will output ragged tensors.")
-    argz.add_argument("--spm-model-file", required=True, help="Path to SPM model file")
-    argz = vars(argz.parse_args())
-    main(argz)
+    parser = argparse.ArgumentParser(description="Convert a .pth file trained using FastAI into a Tensorflow model.\n"
+                                                 "This script will produce four subdirectories containing: "
+                                                 "1) Keras weights, 2) SavedModel, 3) Sentencepiece vocabulary, "
+                                                 "4) FastAI model (copy)")
+    parser.add_argument("--pretrained-model", required=True, help="Path to a pretrained FastAI model (.pth)")
+    parser.add_argument("--qrnn", required=False, action='store_true', help="The .pth file contains a QRNN model")
+    parser.add_argument("--num-recurrent-layers", required=False, type=int, help="Number of recurrent layers")
+    parser.add_argument("--out-path", required=True, help="Output directory where the converted models will be saved")
+    parser.add_argument("--fixed-seq-len", type=int, required=False, help="Fixed sequence length. If unset, the encoder "
+                                                                          "in SavedModel will output ragged tensors.")
+    parser.add_argument("--spm-model-file", required=True, help="Path to SPM model file")
+    argz_ = vars(parser.parse_args())
+    main(argz_)

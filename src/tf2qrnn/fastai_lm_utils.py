@@ -6,8 +6,8 @@ import os
 from fastai.text.data import TensorText
 from fastcore.foundation import L
 
-from ulmfit_commons import file_len
-from ulmfit_tf2 import tf2_ulmfit_encoder
+from .commons import count_lines_in_text_file
+from .encoders import tf2_ulmfit_encoder
 
 
 def lr_or_default(lr, learner_obj):
@@ -34,7 +34,7 @@ def get_fastai_tensors(args):
     for datasource_path, datasource_name, L_tensors, ids_list in data_sources:
         with open(datasource_path, 'r', encoding='utf-8') as f:
             print(f"Reading {datasource_name} from {datasource_path}")
-            num_sents = file_len(datasource_path)
+            num_sents = count_lines_in_text_file(datasource_path)
             cnt = 0
             for line in f:
                 if cnt % 10000 == 0: print(f"Processing {datasource_name}: line {cnt} / {num_sents}...")
@@ -52,10 +52,6 @@ def get_fastai_tensors(args):
 def save_as_keras(*, state_dict, exp_name, save_path, spm_model_file, fixed_seq_len, layer_config):
     """
     Creates an ULMFit inference model using Keras layers and copies weights from FastAI's learner.model.state_dict() there.
-
-    There are many explicit constants in this function, which is intentional. The numbers 400, 1152 and 3 layers refer
-    to the paper's implementation of ULMFit in FastAI.
-
     """
     spm_args = {
         'spm_model_file': spm_model_file,
@@ -83,19 +79,6 @@ def save_as_keras(*, state_dict, exp_name, save_path, spm_model_file, fixed_seq_
                            state_dict[f'0.rnns.{i_rnn}.module.bias_ih_l0'].cpu().numpy()*2]
             lm_num.get_layer(f'AWD_RNN{i_rnn+1}').set_weights(rnn_weights)
 
-    # rnn_weights1 = [state_dict['0.rnns.0.module.weight_ih_l0'].cpu().numpy().T,
-    #                 state_dict['0.rnns.0.weight_hh_l0_raw'].cpu().numpy().T,
-    #                 state_dict['0.rnns.0.module.bias_ih_l0'].cpu().numpy()*2]
-    # rnn_weights2 = [state_dict['0.rnns.1.module.weight_ih_l0'].cpu().numpy().T,
-    #                 state_dict['0.rnns.1.weight_hh_l0_raw'].cpu().numpy().T,
-    #                 state_dict['0.rnns.1.module.bias_ih_l0'].cpu().numpy()*2]
-    # rnn_weights3 = [state_dict['0.rnns.2.module.weight_ih_l0'].cpu().numpy().T,
-    #                 state_dict['0.rnns.2.weight_hh_l0_raw'].cpu().numpy().T,
-    #                 state_dict['0.rnns.2.module.bias_ih_l0'].cpu().numpy()*2]
-
-    # lm_num.get_layer('AWD_RNN1').set_weights(rnn_weights1)
-    # lm_num.get_layer('AWD_RNN2').set_weights(rnn_weights2)
-    # lm_num.get_layer('AWD_RNN3').set_weights(rnn_weights3)
     keras_lm_head_name = 'lm_head_tied' if layer_config['num_hidden_units'][-1] == layer_config['emb_dim'] \
                          else 'lm_head_untied'
 

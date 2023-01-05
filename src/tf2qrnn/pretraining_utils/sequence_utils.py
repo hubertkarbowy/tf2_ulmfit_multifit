@@ -1,7 +1,6 @@
 import subprocess
 import argparse, re
 import json, csv
-import tensorflow as tf
 from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
 

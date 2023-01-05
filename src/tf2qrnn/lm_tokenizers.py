@@ -1,6 +1,6 @@
 import sentencepiece as spm
 
-from ulmfit_tf2 import SPMNumericalizer
+from .encoders import SPMNumericalizer
 
 
 class LMTokenizerFactory:

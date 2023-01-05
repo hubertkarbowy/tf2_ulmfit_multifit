@@ -5,14 +5,17 @@ This script roughly follows the original FastAI's tutorial (https://docs.fast.ai
 but we dispense with their preprocessing transforms. Instead, we provide an already numericalized corpus
 to the trainer object.
 """
+import sys, os
 import argparse
-import os
 from functools import partial
 
-from fastai.basics import *
-from fastai.callback.all import *
-from fastai.text.all import *
-from fastai_lm_utils import get_fastai_tensors, lr_or_default
+try:
+    from fastai.basics import *
+    from fastai.callback.all import *
+    from fastai.text.all import *
+    from .fastai_lm_utils import get_fastai_tensors, lr_or_default
+except ImportError:
+    print("Please install Torch 1.7.1 and Fast AI v.2.2.7 manually (preferably in a separate virtual environment")
 
 
 def _run_pretraining(learner_obj, args):
@@ -25,6 +28,7 @@ def _run_pretraining(learner_obj, args):
                               div=10)
     learner_obj.model.reset()
     return learner_obj
+
 
 def _run_finetuning(learner_obj, args):
     """
@@ -60,11 +64,12 @@ def main(args):
     else:
         splits = [range(0, len(L_tensors_train)), range(len(L_tensors_train), len(L_tensors_train)+len(L_tensors_valid))]
     datasets = Datasets(L_tensors_train+L_tensors_valid, [add(0)],
-                        splits=splits, dl_type=LMDataLoader) # no idea what FastAI's idiom for "identity" is, so faking it with add(0)
+                        splits=splits, dl_type=LMDataLoader) # add(0) means identity function, or no transforms
     print("Instantiating a DataLoaders object with automatic sequence shifter. This may take some time...")
     data_loaders = datasets.dataloaders(bs=args['batch_size'],
                                         seq_len=args['max_seq_len']) # to access a batch, use data_loaders.one_batch().
-                                                                     # The data_loaders object also has .train and .valid fields if needed.
+                                                                     # The data_loaders object also has .train and
+                                                                     # .valid fields if needed.
 
     ############# The actual FastAI training happens below ############
 
@@ -77,11 +82,10 @@ def main(args):
                    'hidden_p': 0.2})
     ulmfit_model = get_language_model(AWD_QRNN if args.get('qrnn') else AWD_LSTM,
                                       args['vocab_size'],
-                                      config=config) # produces a 3-layer LSTM as per the ULMFit paper or a 4-layer QRNN as per the MultiFiT paper
+                                      config=config)
     opt_func = partial(Adam, wd=0.1, eps=1e-7)
     callbacks = [MixedPrecision(),
-                 GradientClip(0.1),
-                 SaveModelCallback(fname=args['exp_name']+'_fastai_ckpt', every_epoch=True) \
+                 GradientClip(0.1) \
                 ] + rnn_cbs(alpha=2, beta=1)
     learner_obj = Learner(data_loaders, ulmfit_model, loss_func=CrossEntropyLossFlat(), opt_func=opt_func, \
                           cbs=callbacks, metrics=[accuracy, Perplexity()])
@@ -96,27 +100,36 @@ def main(args):
     learner_obj.save(os.path.join(args['save_path'], args['exp_name'])) # .pth will be added automatically
 
 if __name__ == "__main__":
-    argz = argparse.ArgumentParser()
-    argz.add_argument("--pretokenized-train", required=False, help="Path to a pretokenized and numericalized training corpus. "
-                      "Make sure you have <s> and </s> tokens there as needed because ULMFiT will concatenate everything "
-                      "into one big stream!")
-    argz.add_argument("--pretokenized-valid", required=False, help="Path to a pretokenized and numericalized validation corpus. "
-                      "Same tokenization rules apply as for the training corpus.")
-    argz.add_argument("--pretrained-model", required=False, help="Path to a pretrained FastAI model. Use this for unsupervised "
-                                                                 "finetuning")
-    argz.add_argument("--min-seq-len", default=10, type=int, help="Minimal sentence length in the original corpus")
-    argz.add_argument("--max-seq-len", default=80, type=int, help="Maximal sequence length in a training batch. This is the same as BPTT.")
-    argz.add_argument("--num-hidden-layers", required=False, type=int, help="Number of hidden layers in the encoder (defaults to 3 for ULMFiT and 4 for QRNN)")
-    argz.add_argument("--batch-size", default=128, type=int, help="Batch size")
-    argz.add_argument("--vocab-size", required=True, type=int, help="Vocabulary size")
-    argz.add_argument("--num-epochs", default=1, type=int, help="Number of epochs to train for")
-    argz.add_argument("--pretrain-lr", required=False, type=float, help="Learning rate value for the one cycle policy optimizer. "
-                      "At pretraining: the optimizer will use it for all layers. "
-                      "At finetuning: this lr will be used for one epoch on unfrozen LM head only") # 5e-3
-    argz.add_argument("--finetune-lr", required=False, type=float, help="Learning rate value for the one cycle policy optimizer. "
-                                                                      "Only used for finetuning starting from the second epoch.") # 5e-4
-    argz.add_argument("--save-path", required=True, help="Path where the outputs will be saved")
-    argz.add_argument("--exp-name", required=True, help="Experiment name")
-    argz.add_argument('--qrnn', action='store_true', help="If set, will train a QRNN language model as per the MultiFiT paper (with 4 hidden layers, not 3)")
-    argz = vars(argz.parse_args())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pretokenized-train", required=False, help="Path to a pretokenized and numericalized training"
+                                                                     "corpus. Make sure you have <s> and </s> tokens"
+                                                                     "there as needed because FastAI will concatenate"
+                                                                     "everything into one big stream.")
+    parser.add_argument("--pretokenized-valid", required=False, help="Path to a pretokenized and numericalized validation"
+                                                                     "corpus. Same tokenization rules apply as for the "
+                                                                     "training corpus.")
+    parser.add_argument("--pretrained-model", required=False, help="Path to a pretrained FastAI model. Use this for"
+                                                                   "unsupervised finetuning")
+    parser.add_argument("--min-seq-len", default=10, type=int, help="Minimal sentence length in the original corpus")
+    parser.add_argument("--max-seq-len", default=80, type=int, help="Maximal sequence length in a training batch. "
+                                                                    "This is the same as BPTT.")
+    parser.add_argument("--num-hidden-layers", required=False, type=int, help="Number of hidden layers in the encoder "
+                                                                              "(defaults to 3 for ULMFiT and 4 for QRNN)")
+    parser.add_argument("--batch-size", default=128, type=int, help="Batch size")
+    parser.add_argument("--vocab-size", required=True, type=int, help="Vocabulary size")
+    parser.add_argument("--num-epochs", default=1, type=int, help="Number of epochs to train for")
+    parser.add_argument("--pretrain-lr", required=False, type=float, help="Maximum learning rate value used by the "
+                                                                          "one cycle policy scheduler. At pretraining: "
+                                                                          "the optimizer will use it for all layers. At"
+                                                                          " finetuning: this lr will be used for one "
+                                                                          "epoch on unfrozen LM head only")
+    parser.add_argument("--finetune-lr", required=False, type=float, help="Learning rate value for the one cycle policy"
+                                                                        " optimizer. Only used for finetuning starting"
+                                                                        " from the second epoch.")
+    parser.add_argument("--save-path", required=True, help="Path where the outputs will be saved")
+    parser.add_argument("--exp-name", required=True, help="Experiment name")
+    parser.add_argument('--qrnn', action='store_true', help="If set, the recurrent layers will be built and trained "
+                                                            "using QRNN cells (MultiFiT paper). Otherwise, AWD LSTM "
+                                                            "cells will be used.")
+    argz = vars(parser.parse_args())
     main(argz)

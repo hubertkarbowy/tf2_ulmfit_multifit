@@ -8,7 +8,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tqdm import trange
 from qrnn.qrnn_tf2 import QRNNCell_ # fixme: fix python imports
-from ulmfit_commons import get_rnn_layers_config
+from commons import get_rnn_layers_config
 
 # todo: un-hardcode the number of recurrent layers in AWD-related functions
 

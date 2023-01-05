@@ -1,13 +1,10 @@
-import os
+import os, sys, subprocess
 import re
-import subprocess
-import sys
 
 import nltk
 import pandas as pd
 import sentencepiece as spm
 
-# from ulmfit_tf2 import AWDCallback, LRFinder
 
 # todo: it should also be possible to define pooling and zoneout on a per-layer basis
 DEFAULT_LAYER_CONFIG = {
@@ -22,7 +19,7 @@ DEFAULT_LAYER_CONFIG = {
 }
 
 
-def file_len(fname):
+def count_lines_in_text_file(fname):
     """ Nothing beats wc -l """
     p = subprocess.Popen(['wc', '-l', fname], stdout=subprocess.PIPE, 
                                               stderr=subprocess.PIPE)
@@ -31,13 +28,21 @@ def file_len(fname):
         raise IOError(err)
     return int(result.strip().split()[0])
 
+
 def read_labels(fname):
     label_map = open(fname, 'r', encoding='utf-8').readlines()
     label_map = {k:v.strip() for k,v in enumerate(label_map) if len(v)>0}
     return label_map
 
+
 def read_numericalize(*, input_file, sep='\t', spm_model_file, label_map=None, max_seq_len=None, fixed_seq_len=None,
                       x_col, y_col, sentence_tokenize=False, cut_off_final_token=False):
+    """ Read a .tsv file containing training / validation data, run sentencepiece tokenization and
+        convert wordpieces to IDs.
+
+        The .tsv file must contain a header. Inputs (X) must be in the column specified by the `x_col` parameter
+        and labels (Y) in the column specified under `y_col`.
+    """
     df = pd.read_csv(input_file, sep=sep)
     if label_map is not None:
         df[y_col] = df[y_col].astype(str)
@@ -60,24 +65,26 @@ def read_numericalize(*, input_file, sep='\t', spm_model_file, label_map=None, m
     labels = df[y_col].tolist()
     return x_data, labels, df
 
+
 def check_unbounded_training(fixed_seq_len, max_seq_len):
     if not any([fixed_seq_len, max_seq_len]):
         print("Warning: you have requested training with an unspecified sequence length. " \
-             "This script will not truncate any sequence, but you should make sure that " \
-             "all your training examples are reasonably long. You should be fine if your " \
-             "training set is split into sentences, but DO make sure that none of them " \
-             "runs into thousands of tokens or you will get out-of-memory errors.\n\n")
+              "This script will not truncate any sequence, but you should make sure that " \
+              "all your training examples are reasonably long. You should be fine if your " \
+              "training set is split into sentences, but DO make sure that none of them " \
+              "runs into thousands of tokens or you will get out-of-memory errors.\n\n")
         sure = "?"
         while sure not in ['y', 'Y', 'n', 'N']:
             sure = input("Are you sure you want to continue? (y/n) ")
         if sure in ['n', 'N']:
             sys.exit(1)
 
+
 def prepare_keras_callbacks(*, args, model, hub_object,
                             monitor_metric='val_sparse_categorical_accuracy'):
     """Build a list of Keras callbacks according to command-line parameters parsed into `args`."""
-    import tensorflow as tf  # tensorflow global import conflicts with fastai
-    from ulmfit_tf2 import AWDCallback, LRFinder
+    import tensorflow as tf
+    from .encoders import AWDCallback, LRFinder
     callbacks = []
     if not args.get('awd_off'):
         if args.get('qrnn'):
@@ -93,12 +100,13 @@ def prepare_keras_callbacks(*, args, model, hub_object,
         best_dir = os.path.join(args['out_path'], 'best_checkpoint')
         os.makedirs(best_dir, exist_ok=True)
         callbacks.append(tf.keras.callbacks.ModelCheckpoint(os.path.join(best_dir, 'best'),
-                                            monitor=monitor_metric,
-                                            save_best_only=True,
-                                            save_weights_only=True))
+                                                            monitor=monitor_metric,
+                                                            save_best_only=True,
+                                                            save_weights_only=True))
     if args.get('tensorboard'):
         callbacks.append(tf.keras.callbacks.TensorBoard(log_dir='tboard_logs', update_freq='batch'))
     return callbacks
+
 
 def print_training_info(*, args, x_train, y_train):
     """
@@ -118,7 +126,9 @@ def print_training_info(*, args, x_train, y_train):
           f"AWD after each batch: {'off' if args.get('awd_off') is True else 'on'}\n" \
           f"******************************************************************")
 
+
 def get_rnn_layers_config(layer_config):
+    """ Prepare a dictionary containing the parameters of recurrent layers. """
     config = DEFAULT_LAYER_CONFIG.copy()
     config.update(layer_config or {})
     if config.get('num_recurrent_layers') is None:
