@@ -8,7 +8,7 @@ import tensorflow as tf
 
 from .corpus_feeder import LMCorpusLoader
 from .corpus_feeder import tensor_shift
-from ..heads import ulmfit_rnn_encoder_native
+from ..heads import build_rnn_encoder_native
 
 PAD_ID = 1
 
@@ -54,11 +54,11 @@ def main(args):
                     'lumped_sents_separator': '[SEP]'}
     else:
         spm_args = None
-    lm_head, spm_encoder = ulmfit_rnn_encoder_native(pretrained_weights=args['pretrained_path'],
-                                                     fixed_seq_len=args.get('max_seq_len'),
-                                                     spm_model_args=spm_args,
-                                                     also_return_spm_encoder=True,
-                                                     return_lm_head=True)
+    lm_head, spm_encoder = build_rnn_encoder_native(pretrained_weights=args['pretrained_path'],
+                                                    fixed_seq_len=args.get('max_seq_len'),
+                                                    spm_model_args=spm_args,
+                                                    also_return_spm_encoder=True,
+                                                    return_lm_head=True)
     lm_head.summary()
     corpus_loader = LMCorpusLoader(corpus_path=args['corpus_path'],
                                    batch_size=args['batch_size'],

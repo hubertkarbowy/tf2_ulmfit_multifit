@@ -10,7 +10,7 @@ from sklearn.metrics import classification_report
 from ..commons import read_labels, read_numericalize, check_unbounded_training, print_training_info, \
                       prepare_keras_callbacks
 from ..encoders import STLRSchedule, OneCycleScheduler, PredictionProgressCallback, SPMNumericalizer, LRFinder
-from ..heads import ulmfit_document_classifier
+from ..heads import build_document_classifier
 
 
 def read_tsv_and_numericalize(*, tsv_file, args, also_return_df=False):
@@ -38,17 +38,21 @@ def read_tsv_and_numericalize(*, tsv_file, args, also_return_df=False):
 def interactive_demo(args):
     spm_args = {'spm_model_file': args['spm_model_file'], 'add_bos': True, 'add_eos': True,
                 'lumped_sents_separator': '[SEP]'}
+    layer_config = {'qrnn': args.get('qrnn'),
+                    'num_recurrent_layers': args.get('num_recurrent_layers'),
+                    'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
     label_map = read_labels(args['label_map'])
     spm_encoder = SPMNumericalizer(spm_path=args['spm_model_file'],
                                    add_bos=True,
                                    add_eos=True,
                                    fixed_seq_len=args.get('fixed_seq_len'))
-    model, _ = ulmfit_document_classifier(model_type=args['model_type'],
-                                          pretrained_encoder_weights=None,
-                                          spm_model_args=spm_args,
-                                          fixed_seq_len=args.get('fixed_seq_len'),
-                                          num_classes=len(label_map),
-                                          with_batch_normalization=args.get('with_batch_normalization') or False)
+    model, _ = build_document_classifier(model_type=args['model_type'],
+                                         pretrained_encoder_weights=None,
+                                         spm_model_args=spm_args,
+                                         fixed_seq_len=args.get('fixed_seq_len'),
+                                         num_classes=len(label_map),
+                                         with_batch_normalization=args.get('with_batch_normalization') or False,
+                                         layer_config=layer_config)
     model.load_weights(args['model_weights_cp']).expect_partial()
     model.summary()
     readline.parse_and_bind('set editing-mode vi')
@@ -67,12 +71,16 @@ def evaluate(args):
                                                                    also_return_df=True)
     spm_args = {'spm_model_file': args['spm_model_file'], 'add_bos': True, 'add_eos': True,
                 'lumped_sents_separator': '[SEP]'}
-    model, _ = ulmfit_document_classifier(model_type=args['model_type'],
-                                          pretrained_encoder_weights=None,
-                                          spm_model_args=spm_args,
-                                          fixed_seq_len=args.get('fixed_seq_len'),
-                                          num_classes=len(label_map),
-                                          with_batch_normalization=args.get('with_batch_normalization') or False)
+    layer_config = {'qrnn': args.get('qrnn'),
+                    'num_recurrent_layers': args.get('num_recurrent_layers'),
+                    'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
+    model, _ = build_document_classifier(model_type=args['model_type'],
+                                         pretrained_encoder_weights=None,
+                                         spm_model_args=spm_args,
+                                         fixed_seq_len=args.get('fixed_seq_len'),
+                                         num_classes=len(label_map),
+                                         with_batch_normalization=args.get('with_batch_normalization') or False,
+                                         layer_config=layer_config)
     model.load_weights(args['model_weights_cp']).expect_partial()
     model.summary()
     y_probs_all = model.predict(x_test, batch_size=args['batch_size'],
@@ -104,12 +112,17 @@ def main(args):
     validation_data = (x_test, y_test) if x_test is not None else None
     spm_args = {'spm_model_file': args['spm_model_file'], 'add_bos': True, 'add_eos': True,
                 'lumped_sents_separator': '[SEP]'}
-    model, hub_object = ulmfit_document_classifier(model_type=args['model_type'],
-                                                   pretrained_encoder_weights=args['model_weights_cp'],
-                                                   spm_model_args=spm_args,
-                                                   fixed_seq_len=args.get('fixed_seq_len'),
-                                                   num_classes=len(label_map),
-                                                   with_batch_normalization=args.get('with_batch_normalization') or False)
+    layer_config = {'qrnn': args.get('qrnn'),
+                    'num_recurrent_layers': args.get('num_recurrent_layers'),
+                    'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
+    model, hub_object = build_document_classifier(model_type=args['model_type'],
+                                                  pretrained_encoder_weights=args['model_weights_cp'],
+                                                  spm_model_args=spm_args,
+                                                  fixed_seq_len=args.get('fixed_seq_len'),
+                                                  num_classes=len(label_map),
+                                                  use_bias=True,
+                                                  with_batch_normalization=args.get('with_batch_normalization') or False,
+                                                  layer_config=layer_config)
     num_steps = (x_train.shape[0] // args['batch_size']) * args['num_epochs']
     print_training_info(args=args, x_train=x_train, y_train=y_train)
     if args.get('lr_finder') is None and args.get('lr_scheduler') == 'stlr':
@@ -150,6 +163,10 @@ if __name__ == "__main__":
     argz.add_argument("--model-weights-cp", required=True, help="Training: path to *weights* (checkpoint) of "
                                                                 "the generic model. Evaluation/Interactive: path to "
                                                                 "*weights* produced by this script during training")
+    argz.add_argument("--qrnn", action='store_true', help="Set this if the pretrained weights contain a QRNN-based"
+                                                          " encoder, otherwise it's an ULMFiT-based model.")
+    argz.add_argument("--qrnn-zoneout", type=float, help="Optional zoneout for the QRNN model.")
+    argz.add_argument("--num-recurrent-layers", type=int, help="Number of recurrent layers in the encoder.")
     argz.add_argument("--model-type", choices=['from_cp', 'from_hub'], default='from_cp',
                       help="Model type: from_cp = from checkpoint, from_hub = from TensorFlow hub")
     argz.add_argument('--spm-model-file', required=True, help="Path to SentencePiece model file")

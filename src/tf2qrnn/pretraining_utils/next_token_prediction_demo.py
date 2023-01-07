@@ -19,7 +19,7 @@ import numpy as np
 import sentencepiece as spm
 import tensorflow as tf
 
-from ..heads import ulmfit_rnn_encoder_native, ulmfit_rnn_encoder_hub
+from ..heads import build_rnn_encoder_native, restore_rnn_encoder_from_savedmodel
 
 UNK_ID=0; PAD_ID=1; BOS_ID=2; EOS_ID=3
 logging.basicConfig(level=logging.INFO)
@@ -79,15 +79,15 @@ def main(args):
     logging.info(str([spmproc.id_to_piece(i) for i in range(10)]))
     logging.info("Restoring a pretrained language model")    
     if args['model_type'] == 'from_cp':
-        lm_num = ulmfit_rnn_encoder_native(pretrained_weights=args['pretrained_model'],
-                                           spm_model_args=spm_model_args,
-                                           also_return_spm_encoder=False,
-                                           return_lm_head=True)
+        lm_num = build_rnn_encoder_native(pretrained_weights=args['pretrained_model'],
+                                          spm_model_args=spm_model_args,
+                                          also_return_spm_encoder=False,
+                                          return_lm_head=True)
     elif args['model_type'] == 'from_hub':
-        _, lm_num, _ = ulmfit_rnn_encoder_hub(pretrained_weights=args['pretrained_model'],
-                                              spm_model_args=spm_model_args,
-                                              also_return_spm_encoder=False,
-                                              return_lm_head=True)
+        _, lm_num, _ = restore_rnn_encoder_from_savedmodel(pretrained_weights=args['pretrained_model'],
+                                                           spm_model_args=spm_model_args,
+                                                           also_return_spm_encoder=False,
+                                                           return_lm_head=True)
     else:
         raise NotImplementedError("Unsupported model source {args['model_type']}!")
     lm_num.summary()

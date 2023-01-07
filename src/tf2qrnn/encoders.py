@@ -7,14 +7,13 @@ import tensorflow_text as text
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tqdm import trange
-from qrnn.qrnn_tf2 import QRNNCell_ # fixme: fix python imports
-from commons import get_rnn_layers_config
+from .qrnn.qrnn_tf2 import QRNNCellImplementation
+from .commons import get_rnn_layers_config
 
-# todo: un-hardcode the number of recurrent layers in AWD-related functions
 
-def get_recurrent_layers(config, SpatialDrop1DLayer):
+def get_recurrent_layers(layer_config, SpatialDrop1DLayer):
     """
-    Generate recurrent layers (LSTM or QRNN) as specified in `config` and add 1D dropout.
+    Generate recurrent layers (AWD-LSTM or QRNN) as specified in `layer_config` and add 1D dropout.
 
     It turns out that the generic Keras RNN API does not use CuDNN kernel for LSTM networks.
     This will always run on a CPU:
@@ -31,23 +30,23 @@ def get_recurrent_layers(config, SpatialDrop1DLayer):
     for serialization as well via the config['enforce_rnn_api_for_lstm'] flag.
     """
     rnn_layers = []
-    for i in range(config['num_recurrent_layers']):
-        if config['qrnn']:
-            layer = tf.keras.layers.RNN(QRNNCell(config['num_hidden_units'][i],
-                                                 kernel_window=config['qrnn_kernel_window'][i],
-                                                 zoneout=config['qrnn_zoneout'],
-                                                 pooling=config['qrnn_pooling'],
-                                                 keep_fastai_bug=config['keep_fastai_bug']),
+    for i in range(layer_config['num_recurrent_layers']):
+        if layer_config['qrnn']:
+            layer = tf.keras.layers.RNN(QRNNCell(layer_config['num_hidden_units'][i],
+                                                 kernel_window=layer_config['qrnn_kernel_window'][i],
+                                                 zoneout=layer_config['qrnn_zoneout'],
+                                                 pooling=layer_config['qrnn_pooling'],
+                                                 keep_fastai_bug=layer_config['keep_fastai_bug']),
                                         return_sequences=True,
                                         name=f"QRNN{i+1}")
         else:
-            if config.get('enforce_rnn_api_for_lstm'):
-                layer = tf.keras.layers.RNN(tf.keras.layers.LSTMCell(config['num_hidden_units'][i],
+            if layer_config.get('enforce_rnn_api_for_lstm'):
+                layer = tf.keras.layers.RNN(tf.keras.layers.LSTMCell(layer_config['num_hidden_units'][i],
                                                                      kernel_initializer='glorot_uniform'),
                                             return_sequences=True,
                                             name=f"AWD_RNN{i+1}")
             else:
-                layer = tf.keras.layers.LSTM(config['num_hidden_units'][i],
+                layer = tf.keras.layers.LSTM(layer_config['num_hidden_units'][i],
                                              kernel_initializer='glorot_uniform',
                                              return_sequences=True,
                                              name=f"AWD_RNN{i+1}")
@@ -55,11 +54,12 @@ def get_recurrent_layers(config, SpatialDrop1DLayer):
         rnn_layers.append((layer, drop))
     return rnn_layers
 
-def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_args=None, vocab_size=None, layer_config=None):
-    """ Builds an ULMFiT as a model trainable in Keras.
+def tf2_recurrent_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_args=None,
+                          vocab_size=None, layer_config=None):
+    """ Build an ULMFiT or a MultiFiT model trainable in Keras.
 
         :param fixed_seq_len:            if set to `None`, builds a variable-length model with RaggedTensors.
-                                         Otherwise uses fixed-length sequences with 1 (not zero!) as padding.
+                                         Otherwise uses fixed-length sequences with 1 as padding.
         :param flatten_ragged_outputs:   if set to `True`, the RaggedTensor output will be returned in a "decomposed"
                                          representation of flat_values and row_splits (see RaggedTensor documentation).
                                          You probably want to set this to `True` if preparing a model for serialization
@@ -72,7 +72,7 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
                                          vocabulary.
         :param layer_config:             an optional dictionary to configure the model's layers. Defaults will kick in where
                                          the values are not supplied explicitly. The configuration keys are as follows:
-                                             `qrnn` - boolean, if set to True the LSTM cells are replaced with QRNN ones (default: False)
+                                             `qrnn` - boolean, use QRNN cells if set to True, otherwise use AWD LSTM (default: False)
                                              `emb_dim` - dimensionality of the embeddings layer (default: 400)
                                              `num_recurrent_layers` - int, number of recurrent layers (default: 3 for LSTM, 4 for QRNN)
                                              `num_hidden_units` - List[int], number of hidden units in each recurrent layer
@@ -80,32 +80,33 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
                                              `qrnn_kernel_window` - int, QRNN kernel size (default: 2)
                                              `qrnn_pooling` - str, pooling method for the QRNN layer (default: 'fo')
                                              `qrnn_zoneout` - float, zoneout value for the QRNN layer (default: 0.0)
-        :return: Returns four instances of tf.keras.Model:
+        :return: Returns four tf.keras.Model objects:
         lm_model_num - encoder with a language modelling head on top (and weights tied to embeddings).
                        This version accepts already numericalized text.
-                       * Example call (fixed length):
+                       * Example call (fixed length of 70 tokens):
 
-                       dziendobry = tf.constant([[11406,  7465, 34951,   218, 34992, 34967, 12545, 34986] + [1]*92])
-                       lm_num(dziendobry)
+                       hello = tf.constant([[11406,  7465, 34951,   218, 34992, 34967, 12545, 34986] + [1]*62])
+                       lm_num(hello)
 
-                       Note that the final 92 padding tokens are masked throughout the model - this is taken care of
+                       Note that the final 62 padding tokens are masked throughout the model - this is taken care of
                        by the `compute_output_mask` in successive layers.
 
-                       * Example call (variable length):
+                       * Example call (variable length, returns ragged tensors):
 
-                       dziendobry = tf.ragged.constant([[11406,  7465, 34951,   218, 34992, 34967, 12545, 34986]])
-                       lm_num(dziendobry)
+                       hello = tf.ragged.constant([[11406,  7465, 34951,   218, 34992, 34967, 12545, 34986]])
+                       lm_num(hello)
 
-        encoder_num - returns only the outputs of the last RNN layer (dim 400 as per ULMFiT paper). Accepts
+        encoder_num - returns only the vector sequences for the last RNN layer (dim 400 as per ULMFiT paper). Accepts
                       already numericalized text. Calling convention is same as for lm_model_num.
                       Again, note the presence of _keras_mask in the output on padding tokens.
 
-        outmask_num - returns explicit mask for an input sequence. Not used in the model itself, but might be useful
-                      for working with some signatures in the serialized version.
+        outmask_num - returns explicit mask for an input sequence showing the position of padding tokens.
+                      Not used in the model itself, but might be useful for working with some signatures in
+                      the serialized version.
 
   spm_encoder_model - if `spm_args` was passed, this holds the numericalizer (otherwise None is returned).
                       The numericalizer accepts a string and outputs its sentencepiece representation. The SPM model
-                      must be trained externally and a path needs to be provided in `spm_args{'spm_model_file'}`
+                      must be trained externally and a path needs to be provided in `spm_args['spm_model_file']`
                       (it is also serialized as a tf.saved_model.Asset). In a fixed length setting,
                       this layer TRUNCATES the text if it's longer than fixed_seq_len tokens and AUTOMATICALLY
                       ADDS PADDING WITH A VALUE OF 1 if needed.
@@ -137,8 +138,9 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
     ##### STAGE 2 - SET UP EMBEDDINGS #####
     # Unfortunately not all Keras objects serialize well when using RaggedTensors.
     # In such cases we provide serializable wrappers around the unruly layers.
+    model_architecture = " MultiFiT" if layer_config.get('qrnn') else "n ULMFiT"
     if fixed_seq_len is None:
-        print(f"Building an ULMFiT model with: \n1) a variable sequence and RaggedTensors"
+        print(f"Building {model_architecture} model with: \n1) a variable sequence and RaggedTensors\n"
               f"2) a vocabulary size of {vocab_size}.")
         print("=====================================================================================================")
         print("NOTE: THIS MODEL USES RAGGED TENSORS AND IS SERIALIZABLE TO A SavedModel WITH A WORKAROUND.")
@@ -148,14 +150,14 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
         print("input_numericalized = tf.ragged.constant([[30, 40, 50, 110], [20, 30]])")
         print("flatvals = input_numericalized.flat_values")
         print("rowspl = input_numericalized.row_splits")
-        print("ret = hub_object.signatures['numericalized_encoder'](flatvals=flatvals, rowspl=rowspl")
+        print("ret = model.signatures['numericalized_encoder'](flatvals=flatvals, rowspl=rowspl")
         print("ret = tf.RaggedTensor.from_row_splits(ret['output_flat'], ret['output_rows']) \n")
         print("======================================================================================-==============")
         EmbedDropLayer = RaggedEmbeddingDropout
         SpatialDrop1DLayer = RaggedSpatialDropout1D
         layer_name_prefix = "ragged_"
     else:
-        print(f"Building an ULMFiT model with: \n1) a fixed sequence length of {fixed_seq_len}\n"
+        print(f"Building {model_architecture} model with: \n1) a fixed sequence length of {fixed_seq_len}\n"
               f"2) a vocabulary size of {vocab_size}.")
         EmbedDropLayer = EmbeddingDropout
         SpatialDrop1DLayer = tf.keras.layers.SpatialDropout1D
@@ -171,11 +173,10 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
     ###### STAGE 3 - RECURRENT LAYERS ######
     rnn_layers_with_dropout = get_recurrent_layers(config, SpatialDrop1DLayer)
 
-    ###### STAGE 4. THE ACTUAL ENCODER MODEL ######
+    ###### STAGE 4. THE MODEL ######
     numericalized_input = tf.keras.layers.Input(shape=(fixed_seq_len,), dtype=tf.int32,
                                                 name=f"{layer_name_prefix}numericalized_input",
                                                 ragged=True if fixed_seq_len is None else False)
-    explicit_mask = ExplicitMaskGenerator(mask_value=1)(numericalized_input)
     m = embedz(numericalized_input)
     m = encoder_dropout(m)
     m = input_dropout(m)
@@ -183,11 +184,14 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
     for (rnn_layer, dropout_layer) in rnn_layers_with_dropout:
         m = rnn_layer(m)
         m = dropout_layer(m)
-        last_drop = m  # yes, to the last drop!
+        last_drop = m
 
     rnn_encoder = last_drop
+    encoder_outputs = \
+        [rnn_encoder.flat_values, rnn_encoder.row_splits] if fixed_seq_len is None and flatten_ragged_outputs is True \
+        else rnn_encoder # RaggedTensors as outputs are not serializable when using signatures as of TF 2.4.3.
 
-    ###### OPTIONAL LANGUAGE MODELLING HEAD FOR FINETUNING #######
+    ###### STAGE 5. LANGUAGE MODELLING HEAD ON TOP OF THE ENCODER (not used in this repo) #######
     if config['num_hidden_units'][-1] == config['emb_dim']:
         fc_head = tf.keras.layers.TimeDistributed(TiedDense(reference_layer=embedz, activation='softmax'),
                                                   name='lm_head_tied')
@@ -198,60 +202,67 @@ def tf2_ulmfit_encoder(*, fixed_seq_len=None, flatten_ragged_outputs=True, spm_a
     lm = fc_head(rnn_encoder)
     lm = fc_head_dp(lm)
 
-    ##### ALL MODELS ASSEMBLED TOGETHER #####
+    ##### SUMMARY: ALL MODELS ASSEMBLED TOGETHER #####
     lm_model_num = tf.keras.Model(inputs=numericalized_input, outputs=lm)
-    if fixed_seq_len is None and flatten_ragged_outputs is True:
-        # RaggedTensors as outputs are not serializable when using signatures. This *may* be fixed in TF 2.5.1
-        encoder_num = tf.keras.Model(inputs=numericalized_input,
-                                     outputs=[rnn_encoder.flat_values, rnn_encoder.row_splits])
-    else:
-        encoder_num = tf.keras.Model(inputs=numericalized_input, outputs=rnn_encoder)
+    encoder_num = tf.keras.Model(inputs=numericalized_input, outputs=encoder_outputs)
+    explicit_mask = ExplicitMaskGenerator(mask_value=1)(numericalized_input)
     outmask_num = tf.keras.Model(inputs=numericalized_input, outputs=explicit_mask)
     return lm_model_num, encoder_num, outmask_num, spm_encoder_model
 
-class ExportableGenericRecurrentLM(tf.keras.Model):
+class ExportableRecurrentEncoder(tf.keras.Model):
     """
     This class encapsulates a TF2 SavedModel serializable version of an RNN language model with a couple of useful
     signatures for flexibility.
 
-    Use this class to export a QRNN model. If you want to export an ULMFiT model, use the ExportableULMFiT class
+    Use this class to export a QRNN model. If you want to export the ULMFiT architecture, use the ExportableULMFiT class
     instead to include AWD regularization. QRNNs lack recurrent weights, so AWD does not apply.
 
-    Serialization procedure:
+    Serialization procedure (also see convert_fastai2keras.py):
 
-    spm_args = {'spm_model_file': '/tmp/plwiki100-sp35k.model', 'add_bos': True, 'add_eos': True,
-                'lumped_sents_separator': '[SEP]'}
-    lm_num, enc_num, outmask_num, spm_encoder_model = tf2_ulmfit_encoder(fixed_seq_len=200, spm_args=spm_args)
+    spm_args = {'spm_model_file': 'plwiki100-sp35k.model', 'add_bos': True, 'add_eos': True}
+    layer_config = .......
+    lm_num, enc_num, outmask_num, spm_encoder_model = tf2_recurrent_encoder(fixed_seq_len=70, spm_args=spm_args)
     tf.keras.backend.set_learning_phase(0)
-    exportable = ExportableULMFiT(encoder_num, outmask_num, spm_encoder_model)
+    exportable = ExportableRecurrentEncoder(encoder_num, outmask_num, spm_encoder_model, layer_config)
     convenience_signatures={'numericalized_encoder': exportable.numericalized_encoder,
                             'string_encoder': exportable.string_encoder,
                             'spm_processor': exportable.string_numericalizer}
-    tf.saved_model.save(exportable, 'ulmfit_tf2', signatures=convenience_signatures)
+    tf.saved_model.save(exportable, './out_dir', signatures=convenience_signatures)
 
 
-    Deserialization (you don't need any Python code and it really works with all the custom tweaks!):
+    Deserialization (no code from this repo is needed):
 
-    import tensorflow_text # must do it explicitly!
-    import tensorflow_hub as hub
     import tensorflow as tf
+    import tensorflow_text # must do it explicitly to register the sentencepiece op
 
-    restored_hub = hub.load('ulmfit_tf2')   # now you can work with functions listed in signatures:
-    hello_vectors = restored_hub(tf.constant(["Dzień dobry, ULMFiT!"]))
+    model = tf.saved_model.load('./out_dir')   # now you can work with functions listed in signatures:
+    hello_vectors = model(tf.constant(["Hello, world!"]))
 
-    Note the above examples return dictionaries with the encoder, numericalized tokens and mask outputs.
-    If you want to use RNN vectors as a Keras layer you can access the serialized model
-    directly like this:
+    You will see that the model returns a dictionary whose keys represent:
+      * 'output'        - the sequence vectors as predicted by the recurrent language model
+      * 'numericalized' - subword IDs after running sentencepiece tokenization on the input. Note that
+                          the padding symbol is 1, not 0.
+      * 'mask'          - a boolean array showing which timesteps contained input tokens (True) and
+                          which ones were merely padding (False).
 
-    rnn_encoder = hub.KerasLayer(restored_hub.encoder_str, trainable=True) # or .encoder_num for numericalized inputs
-    hello_vectors = rnn_encoder(tf.constant(['Dzień dobry, ULMFiT']))
+    It is possible to wrap the deserialized encoder into a single Keras layer using the tensorflow_hub package.
+    This lets you use it in the same way as any other layer while keeping the mechanics hidden away.
+    (the model itself doesn't need to be uploaded to TF Hub - the .tar.gz archive can be unpacked to a local file
+    system). Note, however, that the ._keras_mask property isn't serialized and must be manually "restored"
+    from the 'mask' dictionary key. Here is a complete example how to achieve this:
 
-    If you want, you can also manually verify that all the fancy dropouts from the ULMFiT paper are there:
+    import tensorflow_hub as hub
+    input_layer = tf.keras.layers.Input((), dtype=tf.string)
+    encoder_layer = hub.KerasLayer(model.signatures['string_encoder'], trainable=True)
+    vectors, mask_from_models = encoder_layer(input_layer)['output'], encoder_layer(input_layer)['mask']
+    mask_reshaper = tf.keras.layers.Lambda(lambda mask_tensor: tf.cast(tf.expand_dims(mask_tensor, -1), dtype=tf.float32),
+                                           name="mask_reshaper")
+    reshaped_mask_tensor = mask_reshaper(mask_from_models)
+    zeroed_vectors = tf.keras.layers.Multiply()([vectors, reshaped_mask_tensor])
+    masked_vectors = tf.keras.layers.Masking(mask_value=0.0)(zeroed_vectors)
+    m = tf.keras.models.Model(inputs=input_layer, outputs=masked_vectors)
 
-    tf.keras.backend.set_learning_phase(1)
-    Now call `rnn_encoder(tf.constant([['Dzień dobry, ULMFiT']]))` a couple of times - you will see
-    values changing all the time (due to WeightDrop in the RNN layers) and some zeros (due to regular
-    dropout on the output).
+    You can now run m(tf.constant(['Hello, world!'])) and verify that the ._keras_mask has been restored.
     """
 
     def __init__(self, encoder_num, outmask_num, spm_encoder_model, lm_head_biases=None):
@@ -265,8 +276,6 @@ class ExportableGenericRecurrentLM(tf.keras.Model):
 
     @tf.function(input_signature=[tf.TensorSpec((None,), dtype=tf.string)])
     def __call__(self, x):
-        tf.print("WARNING: to obtain a trainable model, please wrap the `string_encoder` " \
-                 "or `numericalized_encoder` signature into a hub.KerasLayer(..., trainable=True) object. \n")
         return self.string_encoder(x)
 
     @tf.function(input_signature=[tf.TensorSpec([None, None], dtype=tf.int32)])
@@ -290,7 +299,8 @@ class ExportableGenericRecurrentLM(tf.keras.Model):
         return {'numericalized': numerical_representation,
                 'mask': mask}
 
-class ExportableULMFiT(ExportableGenericRecurrentLM):
+class ExportableULMFiT(ExportableRecurrentEncoder):
+    """ This class is just for exporting the ULMFiT models. """
 
     def __init__(self, encoder_num, outmask_num, spm_encoder_model, lm_head_biases=None):
         super().__init__(encoder_num, outmask_num, spm_encoder_model, lm_head_biases)
@@ -420,7 +430,6 @@ class SPMNumericalizer(tf.keras.layers.Layer):
         self.trainable = False
 
     def build(self, input_shape):
-        print(f">>>> INSIDE BUILD / SPMTOK <<<< {input_shape} ")
         super().build(input_shape)
 
     @tf.function
@@ -513,7 +522,7 @@ class RaggedSparseCategoricalCrossEntropy(tf.keras.losses.SparseCategoricalCross
 
 
 @keras_register_once(package='Custom', name='QRNNCell')
-class QRNNCell(QRNNCell_):
+class QRNNCell(QRNNCellImplementation):
     pass
 
 # @tf.keras.utils.register_keras_serializable()
@@ -530,7 +539,6 @@ class RaggedEmbeddingDropout(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self.bsize = input_shape[0]
-        print(">>>> INSIDE BUILD / RaggedEmbDrop <<<<")
 
     def call(self, inputs, training=None): # inputs is a ragged tensor now
         if training is None:
@@ -582,7 +590,6 @@ class EmbeddingDropout(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self.bsize = input_shape[0]
-        print(">>>> INSIDE BUILD <<<< ")
 
     def call(self, inputs, training=None):
         if training is None:
@@ -700,7 +707,7 @@ class ExplicitMaskGenerator(tf.keras.layers.Layer):
 class CustomMaskableEmbedding(tf.keras.layers.Embedding):
     """ Enhancement of TF's embedding layer where you can set the custom
         value for the mask token, not just zero. SentencePiece uses 1 for <pad>
-        and 0 for <unk> and ULMFiT has adopted this convention too.
+        and 0 for <unk> and ULMFiT / MultiFiT have adopted this convention too.
     """
     def __init__(self, input_dim, output_dim, embeddings_initializer='uniform',
                  embeddings_regularizer=None, activity_regularizer=None,
@@ -747,7 +754,6 @@ class RaggedSpatialDropout1D(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self.bsize = input_shape[0]
-        print(">>>> INSIDE BUILD / RSD<<<< ")
 
     def call(self, inputs, training=None): # inputs is a ragged tensor now
         if training is None:
@@ -802,7 +808,7 @@ class ConcatPooler(tf.keras.layers.Layer):
         self._supports_ragged_inputs = False # for compatibility with TF 2.2
     
     def build(self, input_shape):
-        print(">>>> INSIDE BUILD / ConcatPooler <<<< ")
+        pass
     
     def call(self, inputs, training=None, mask=None): # inputs is a fixed-length tensor
         # We cannot use the line below. An tf.keras.layers.LSTMCell wrapped around tf.keras.layers.RNN propagates the last hidden
@@ -886,6 +892,7 @@ def apply_awd_eagerly(encoder_num, awd_rate):
 
         Note: there is also a variant of this function that is serialized into a SavedModel.
         See ExportableULMFiT object for details.
+        TOOD: Un-hardcode the number of layers
     """
     # tf.print("Applying AWD eagerly")
     rnn1_w = encoder_num.get_layer("AWD_RNN1").variables

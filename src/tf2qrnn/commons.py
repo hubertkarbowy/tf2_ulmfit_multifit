@@ -10,7 +10,7 @@ import sentencepiece as spm
 DEFAULT_LAYER_CONFIG = {
     'qrnn': False,
     'emb_dim': 400,
-    'num_recurrent_layers': None,
+    'num_recurrent_layers': 4,
     'num_hidden_units': None,
     'qrnn_kernel_window': None,
     'qrnn_pooling': 'fo',

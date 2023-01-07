@@ -187,105 +187,93 @@ The encoder transforms batches of strings into sequences of vectors representing
 
 
 
-### 3.1. Tokenization and numericalization
+### 3.1. Obtaining the RNN encoder from a SavedModel
 
-Unlike FastAI, we use [Sentencepiece](https://github.com/google/sentencepiece) to tokenize the input text into subwords. To convert tokens into their IDs (numericalization) you can use the downloaded vocabulary files directly with Python's `sentencepiece` module or its Tensorflow wrapper available in `tensorflow_text` as described in [this manual](https://www.tensorflow.org/tutorials/tensorflow_text/subwords_tokenizer). Our vocabularies contain the following special symbols:
-
-* 0 - `<unk>`
-* 1 - `<pad>` (please note the important difference: Keras uses `0` as the default padding index, not 1. Models in this repo are already configured to have a mask on `1` propagated throughout the layers [as explained in this article](https://www.tensorflow.org/guide/keras/masking_and_padding), but should you choose to reconfigure the layers or use custom heads over the encoder, this needs to be taken into account.
-* 2 - `<s>` - beginning of sentence
-* 3 - `</s>`- end of sentence
-
-We also provide a Keras layer object called `SPMNumericalizer` which you can instantiate with a path to the `.model` file. This is convenient if you just need to process a text dataset into token IDs without worrying about the whole mechanics of vocabulary building:
+As explained in "Installation and quick start", you don't need code from this repo to restore an encoder from a SavedModel directory. However, serialization detaches a very important piece of information from the output vectors - namely the `._keras_mask` property. This is somewhat inconvenient because we cannot use such "deficient" tensors with convenient Keras layers such as TimeDistributed or Attention that rely on this property. Fortunately, this property can be restored by wrapping the encoder into a `KerasLayer` object from the `tensorflow_hub` package and a few other operations involving the `mask` key from the `string_encoder` signature . Here is a complete example:
 
 ```
 import tensorflow as tf
-from ulmfit_tf2 import SPMNumericalizer
+import tensorflow_text # must do it explicitly to register the sentencepiece op
+import tensorflow_hub as hub
 
-spm_processor = SPMNumericalizer(name='spm_layer',
-                                 spm_path='enwiki100-cased-sp35k.model',
-                                 add_bos=True,
-                                 add_eos=True)
-print(spm_processor(tf.constant(['Hello, world'], dtype=tf.string)))
-<tf.RaggedTensor [[2, 6753, 34942, 34957, 770, 3]]>
+restored_model = tf.saved_model.load('path-to-unpacked-savedmodel-directory')
+
+input_layer = tf.keras.layers.Input((), dtype=tf.string)
+encoder_layer = hub.KerasLayer(restored_model.signatures['string_encoder'], trainable=True)
+vectors, mask_from_models = encoder_layer(input_layer)['output'], encoder_layer(input_layer)['mask']
+mask_reshaper = tf.keras.layers.Lambda( \
+    lambda mask_tensor: tf.cast(tf.expand_dims(mask_tensor, -1), dtype=tf.float32),name="mask_reshaper"\
+)
+reshaped_mask_tensor = mask_reshaper(mask_from_models)
+zeroed_vectors = tf.keras.layers.Multiply()([vectors, reshaped_mask_tensor])
+masked_vectors = tf.keras.layers.Masking(mask_value=0.0)(zeroed_vectors)
+
+model = tf.keras.models.Model(inputs=input_layer, outputs=masked_vectors)
 ```
 
-As you can see, the `SPMNumericalizer` object can even add BOS/EOS markers to each sequence. This can be seen in the output - the numericalized sequence begins with `2` and ends with `3`.
+You can now run `model(tf.constant(['Hello, world!']))` and verify that the `._keras_mask` property has been restored.
 
 
 
-### 3.2. Fixed-length vs variable-length sequences
+### 3.2. Initializing a new encoder from Python code and loading weights from a Keras checkpoint
 
-In the previous section you see that sequences are numericalized into RaggedTensors containing variable length sequences. All the scripts, classes and functions in this repository operate on RaggedTensors by default. We also assumed this input to be used in the SavedModel modules available from Tensorflow Hub, **however this convenience also carries a very significant drawback. Specifically, with RaggedTensors you cannot currently use Nvidia's CuDNN kernels for training LSTM networks (https://github.com/tensorflow/tensorflow/issues/48838). This slows down your training on a GPU by ~5 to 7 times in comparison with the optimized implementation. For efficient training, you still need to set a fixed sequence length and add padding**:
-
-```
-spm_processor = SPMNumericalizer(name='spm_layer',
-                                 spm_path='enwiki100-cased-sp35k.model',
-                                 add_bos=True,
-                                 add_eos=True,
-                                 fixed_seq_len=70)
-print(spm_processor(tf.constant([['Hello, world']], dtype=tf.string)))
-tf.Tensor(
-[[    2  6753 34942 34957   770     3     1     1     1     1     1     1
-      1     1     1     1     1     1     1     1     1     1     1     1
-      1     1     1     1     1     1     1     1     1     1     1     1
-      1     1     1     1     1     1     1     1     1     1     1     1
-      1     1     1     1     1     1     1     1     1     1     1     1
-      1     1     1     1     1     1     1     1     1     1]], shape=(1, 70), dtype=int32)
-```
-
-If you use the **`fixed_seq_len`** parameter in `SPMNumericalizer`, you should also ensure that any downstream layer consumes tensors with compatible shapes.  Specifically, the encoder (see next section) needs to be built with this parameter as well. The demo scripts in the [examples](examples/) directory can also be run with a `--fixed-seq-len` argument and this guide shows how to use the CUDA-optimized versions.
-
-
-
-### 3.3. Obtaining the RNN encoder and restoring pretrained weights
-
-You can get an instance of a trainable `tf.keras.Model` containing the encoder by calling the `tf2_ulmfit_encoder` function like this:
+The code below will instantiate a fresh Keras model for a QRNN network with four layers and weights initialized randomly. The layer hyperparameters can be adjusted by modifying the dictionary returned by `tf2qrnn.get_rnn_layers_config` (which see). You will also need one of the Sentencepiece models to set up the subword tokenizer:
 
 ```
-import tensorflow as tf
-from ulmfit_tf2 import tf2_ulmfit_encoder
-spm_args = {'spm_model_file': 'enwiki100-cased-sp35k.model',
+from tf2qrnn import tf2_recurrent_encoder
+from tf2qrnn.commons import get_rnn_layers_config
+
+layer_config = get_rnn_layers_config({'qrnn': True}) 
+spm_args = {'spm_model_file': 'some/path/to/enwiki100-cased-sp35k.model',
             'add_bos': True,
             'add_eos': True,
             'fixed_seq_len': 70}
-lm_num, encoder_num, mask_num, spm_encoder_model = tf2_ulmfit_encoder(spm_args=spm_args,
-                                                                       fixed_seq_len=70)
+_, encoder_num, _, spm_encoder_model = tf2_recurrent_encoder(spm_args=spm_args,
+																		 fixed_seq_len=70,
+                                                                         layer_config=layer_config)
+
+```
+
+This function returns two objects that are of interest to us (both of them instances of `tf.keras.Model`):
+
+* **encoder_num** - the encoder which outputs just the vectors for the topmost recurrent layer
+* **spm_encoder_model** - the subword tokenizer together with numericalization. This object also ensures that sequences are padded and that the padding mask is propagated through successive Keras layers built on top of its output.
+
+You can view their structure just like any other Keras model by calling the `summary` method:
+
+```
 encoder_num.summary()
-```
-
-Note that this function returns four objects (all of them instances of `tf.keras.Model`) with **`encoder_num`** being the actual encoder. You can view its structure just like any other Keras model by calling the `summary` method:
-
-```
 Model: "model_2"
 _________________________________________________________________
-Layer (type)                 Output Shape              Param #   
+Layer (type)                 Output Shape              Param #
 =================================================================
-numericalized_input (InputLa [(None, 70)]              0         
+numericalized_input (InputLa [(None, 70)]              0
 _________________________________________________________________
-ulmfit_embeds (CustomMaskabl (None, 70, 400)           14000000  
+ulmfit_embeds (CustomMaskabl (None, 70, 400)           14000000
 _________________________________________________________________
-emb_dropout (EmbeddingDropou (None, 70, 400)           0         
+emb_dropout (EmbeddingDropou (None, 70, 400)           0
 _________________________________________________________________
-inp_dropout (SpatialDropout1 (None, 70, 400)           0         
+inp_dropout (SpatialDropout1 (None, 70, 400)           0
+_________________________________________________________________                              
+QRNN1 (RNN)                  (None, 70, 1552)          3729456                                 
 _________________________________________________________________
-AWD_RNN1 (LSTM)              (None, 70, 1152)          7156224   
+rnn_drop1 (SpatialDropout1D) (None, 70, 1552)          0
+_________________________________________________________________                              
+QRNN2 (RNN)                  (None, 70, 1552)          7230768
 _________________________________________________________________
-rnn_drop1 (SpatialDropout1D) (None, 70, 1152)          0         
+rnn_drop2 (SpatialDropout1D) (None, 70, 1552)          0
+_________________________________________________________________                              
+QRNN3 (RNN)                  (None, 70, 1552)          7230768
+_________________________________________________________________                              
+rnn_drop3 (SpatialDropout1D) (None, 70, 1552)          0
 _________________________________________________________________
-AWD_RNN2 (LSTM)              (None, 70, 1152)          10621440  
+QRNN4 (RNN)                  (None, 70, 400)           1863600
 _________________________________________________________________
-rnn_drop2 (SpatialDropout1D) (None, 70, 1152)          0         
-_________________________________________________________________
-AWD_RNN3 (LSTM)              (None, 70, 400)           2484800   
-_________________________________________________________________
-rnn_drop3 (SpatialDropout1D) (None, 70, 400)           0         
-=================================================================
-Total params: 34,262,464
-Trainable params: 34,262,464
+rnn_drop4 (SpatialDropout1D) (None, 70, 400)           0
+=================================================================                              
+Total params: 34,054,592
+Trainable params: 34,054,592
 Non-trainable params: 0
-_________________________________________________________________
-
 ```
 
 Let's now see how we can get the sentence representation. First, we need some texts converted to token IDs. We can use the **`spm_encoder_model`** to obtain it, then all we need to do is pass these IDs to **encoder_num**:
@@ -296,26 +284,63 @@ vectors = encoder_num(text_ids)
 print(vectors.shape)      # (2, 70, 400)
 ```
 
-There are two sentences in our "batch", so the zeroeth dimension is 2. Sequences are padded to 70 tokens, hence the first dimension is 70. Finally, each output hidden state is represented by 400 floats, so the third dimension is 400 (if the encoder was instantiated with `fixed_seq_len=None`, the output would be a `RaggedTensor` of shape `(2, None, 400)`).
+There are two sentences in our batch, so the zeroeth dimension is 2. Sequences are padded to 70 tokens, hence the first dimension is 70. Finally, each output hidden state is represented by 400 floats, so the third dimension is 400 (if the encoder was instantiated with `fixed_seq_len=None`, the output would instead be a `RaggedTensor` of shape `(2, None, 400)`).
 
-The other two objects returned by `tf2_ulmfit_encoder` are:
+You now have a encoder model with randomly initialized weights. Sometimes this is sufficient for very simple tasks, but generally you will probably want to restore the pretrained weights. This can be done using standard Keras function `load_weights` in the same way as you do with all other Keras models, for example:
 
-* **`lm_num`** - the encoder with a language modelling head on top. We have followed the ULMFiT paper here and implemented **weight tying** - the LM head's weights (but not biases) are tied to the embedding layer. You will probably only want this for the next-token prediction demo.
-* **`mask_num`** - returns a mask tensor where `True` means a normal token and `False` means padding. Note that the encoder layers already support mask propagation (just as a reminder: the padding token in ULMFiT is 1, not 0) via the Keras API. You can verify this by comparing the output of `mask_num(text_ids)` to `vectors._keras_mask`. The "masker model" is not used anywhere in the example scripts, but might be quite useful if you intend to build custom SavedModels..
+```
+encoder_num.load_weights('path-to-unpacked-keras-weights-dir/qrnn-enwiki100-sp35k-uncased')
+```
 
-You now have an ULMFiT encoder model with randomly initialized weights. Sometimes this is sufficient for very simple tasks, but generally you will probably want to restore the pretrained weights. This can be done using standard Keras function `load_weights` in the same way as you do with all other Keras models. You just need to provide a path to the directory containing the `checkpoint` and the model name (the `.expect_partial()` bit tells Keras to restore as much as it can from checkpoint and ignore the rest. This quenches some warnings about the optimizer state.):
+As the optimizer state wasn't saved with the weights, you might want to add `.expect_partial()` to the above to quench warnings about that.
 
-```encoder_num.load_weights('keras_weights/enwiki100_20epochs_35k_cased').expect_partial()```
 
-#### Extra note - restoring a SavedModel
 
-* It is also possible to restore the encoder from a local copy of a SavedModel directory. This is a little more involved and you will lose the information about all those prettily printed layers, but see the function `ulmfit_rnn_encoder_hub` in [ulmfit_tf2_heads.py](ulmfit_tf2_heads.py) if you are interested in this use case.
+### 3.3. More about subword tokenization and numericalization
 
-  
+Unlike FastAI, we use [Sentencepiece](https://github.com/google/sentencepiece) to tokenize the input text into subwords. To convert tokens into their IDs (numericalization) we use the pretrained vocabulary files directly with Python's `sentencepiece` module and its Tensorflow wrapper available in `tensorflow_text` as described in [this manual](https://www.tensorflow.org/tutorials/tensorflow_text/subwords_tokenizer). Our vocabularies contain the following special symbols:
 
-## 4. How to use ULMFiT for Tensorflow with some typical NLP tasks
+* 0 - `<unk>`
+* 1 - `<pad>` (please note the important difference: Keras uses `0` as the default padding index, not 1. Models in this repo are already configured to have a mask on `1` propagated throughout the layers [as explained in this article](https://www.tensorflow.org/guide/keras/masking_and_padding), but should you choose to reconfigure the layers or use custom heads over the encoder, this needs to be taken into account.
+* 2 - `<s>` - beginning of sentence
+* 3 - `</s>`- end of sentence
 
-In the [examples](examples) directory we are providing training scripts which illustrate how the ULMFiT encoder can be used for a variety of downstream tasks. All the scripts are executable from the command line as Python modules (`python -m examples.ulmfit_tf_text_classifer --help`). After training models on custom data, you can run these scripts with the `--interactive` switch which allows you to type text in the console and display predictions.
+We also provide a Keras layer object called `SPMNumericalizer` which you can instantiate with a path to the `.model` file. This is convenient if you just need to process a text dataset into token IDs. 
+
+```
+import tensorflow as tf
+from tf2qrnn import SPMNumericalizer
+
+spm_processor = SPMNumericalizer(name='spm_layer',
+                                 spm_path='enwiki100-cased-sp35k.model',
+                                 add_bos=True,
+                                 add_eos=True,
+                                 fixed_seq_len=70)
+print(spm_processor(tf.constant(['Hello, world'], dtype=tf.string)))
+<tf.Tensor: shape=(1, 70), dtype=int32, numpy=
+array([[    2, 34934,     0,  9007, 34955,   482,     3,     1,     1,
+            1,     1,     1,     1,     1,     1,     1,     1,     1,
+            1,     1,     1,     1,     1,     1,     1,     1,     1,
+            1,     1,     1,     1,     1,     1,     1,     1,     1,
+            1,     1,     1,     1,     1,     1,     1,     1,     1,
+            1,     1,     1,     1,     1,     1,     1,     1,     1,
+            1,     1,     1,     1,     1,     1,     1,     1,     1,
+            1,     1,     1,     1,     1,     1,     1]], dtype=int32)>
+```
+
+As an aside, it is possible to omit the `fixed_seq_len` parameter, in which case the output is:
+
+```
+<tf.RaggedTensor [[2, 34934, 0, 9007, 34955, 482, 3]]>
+```
+
+The code in this repo should generally work with ragged tensors, but we have found that extra effort needs to be taken when serializing and deserializing such models. Moreover, we encountered performance issues with RaggedTensors with older TF versions. Therefore, in this guide we assume the sequences are fixed-length and padded.
+
+
+
+## 4. How to use QRNN for Tensorflow with some typical NLP tasks
+
+In the [examples](src/tf2qrnn/examples) directory we are providing training scripts which illustrate how the QRNN / ULMFiT encoder can be used for a variety of downstream tasks. All the scripts are executable from the command line as Python modules (for example: `python -m tf2qrnn.examples.classifer --help`). After training models on custom data, you can run these scripts with the `--interactive` switch which allows you to type text in the console and display predictions. These convenience scripts were checked to run with encoder weights loaded from a Keras checkpoint (`--model-type from_cp` parameter) - we haven't checked them with encoders restored from a SavedModel.
 
 ### 4.1. Common parameter names used in this repo
 
@@ -345,7 +370,7 @@ The `main` method of each example script accepts a single parameter called `args
 
 
 
-### 4.2. Document classification (the ULMFiT way - `ulmfit_tf_text_classifier.py`)
+### 4.2. Document classification (the ULMFiT / MultiFiT way - `classifier.py`)
 
 This script attempts to replicate the document classifier architecture from the original ULMFiT paper. On top of the encoder there is a layer that concatenates three vectors:
 
@@ -353,7 +378,7 @@ This script attempts to replicate the document classifier architecture from the 
 * the average-pooled sentence vector
 * the encoder's last hidden state
 
-This representation is then passed through a 50-dimensional Dense layer. The last layer has a softmax activation and many neurons as there are classes. One issue we encountered here is batch normalization, which is included in the original paper and the FastAI text classifier model, but which we were not able to use in Tensorflow. When adding BatchNorm to the model we found that we could not get it to converge on the validation set, so it is disabled in our scripts. If you nevertheless wish to enable it, pass the `--with-batch-norm` flag (and do let us know what we're doing wrong!).
+This representation is then passed through a 50-dimensional Dense layer. The last layer has a softmax activation and many neurons as there are classes. One issue we encountered here is batch normalization, which is included in the original paper and the FastAI text classifier model, but which we were not able to use in Tensorflow. When adding BatchNorm to the model we found that we could not get it to converge on the validation set, so it is disabled in our scripts. If you nevertheless wish to enable it, pass the `--with-batch-norm` flag (and do let us know what we're doing wrong).
 
 Example invocation:
 
@@ -365,8 +390,8 @@ python -m examples.ulmfit_tf_text_classifier \
           --label-map examples_data/document_classification_labels.txt \
           --model-weights-cp keras_weights/enwiki100_20epochs_35k_uncased \
           --model-type from_cp \
-          --spm-model-file enwiki100-uncased-sp35k.model \
-          --fixed-seq-len 300 \
+          --spm-model-file spm_models/enwiki100-uncased-sp35k.model \
+          --fixed-seq-len 70 \
           --num-epochs 12 \
           --batch-size 16 \
           --lr 0.0025 \
@@ -393,16 +418,6 @@ Paste a document to classify: this is the most fascinating film i've ever seen .
 [('POSITIVE', 0.998953104019165), ('NEGATIVE', 0.0010468183318153024)]
 Classification result: P(POSITIVE) = 0.998953104019165
 ```
-
-
-
-### 4.3. Document classification (the classical way `ulmfit_tf_lasthidden_classifier.py`)
-
-This script shows you how you can use the sequence's last hidden state to build a document classifier. We found that its performance was far worse with our pretrained models than the performance of a classifier described in the previous section. We suspect this is because the model was pretrained using a sentence-tokenized corpus with EOS markers at the end of each sequence. To be coherent, we also passed the EOS marker to the classification head in this script, but apparently the recurrent network isn't able to store various sentence "summaries" in an identical token. We nevertheless leave this classification head in the repo in case anyone wanted to investigate potential bugs.
-
-From a technical point of view obtaining the last hidden state is somewhat challenging with RaggedTensors. It turns out we cannot use -1 indexing (`encoder_output[:, -1, :]`) as we would normally do with fixed-length tensors. See the function `ulmfit_last_hidden_state` in [ulmfit_tf2_heads.py](ulmfit_tf2_heads.py) for a workaround.
-
-The invocation is identical as in the previous section.
 
 
 

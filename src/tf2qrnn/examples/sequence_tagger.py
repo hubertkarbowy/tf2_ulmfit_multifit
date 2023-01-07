@@ -12,7 +12,7 @@ from termcolor import colored
 from ..lm_tokenizers import LMTokenizerFactory
 from ..commons import check_unbounded_training, print_training_info, prepare_keras_callbacks
 from ..encoders import STLRSchedule, OneCycleScheduler, RaggedSparseCategoricalCrossEntropy, apply_awd_eagerly
-from ..heads import ulmfit_sequence_tagger
+from ..heads import build_sequence_tagger
 from ..pretraining_utils.sequence_utils import tokenize_and_align_labels
 
 # DEFAULT_LABEL_MAP = {0: 'O', 1: 'B-N', 2: 'I-N'}
@@ -29,10 +29,10 @@ def read_labels(label_path):
     return label_map, rev_label_map
 
 
-def interactive_demo(label_map, spmproc, ulmfit_tagger, seqtagger_weights_cp):
-    ulmfit_tagger.load_weights(seqtagger_weights_cp)
+def interactive_demo(label_map, spmproc, rnn_tagger, seqtagger_weights_cp):
+    rnn_tagger.load_weights(seqtagger_weights_cp)
     print("Restored weights successfully")
-    ulmfit_tagger.summary()
+    rnn_tagger.summary()
     readline.parse_and_bind('set editing-mode vi')
     while True:
         sent = input("Write a sentence to tag: ")
@@ -42,11 +42,11 @@ def interactive_demo(label_map, spmproc, ulmfit_tagger, seqtagger_weights_cp):
         subword_ids = subword_ids_tensor.numpy()[0].tolist()
         subwords = spmproc.spmproc.id_to_string(subword_ids).numpy().tolist()  # this contains bytes, not strings
         subwords = [s.decode() for s in subwords]
-        ret = tf.argmax(ulmfit_tagger.predict(subword_ids_tensor)[0], axis=1).numpy().tolist()
+        ret = tf.argmax(rnn_tagger.predict(subword_ids_tensor)[0], axis=1).numpy().tolist()
         for subword, category in zip(subwords, ret):
             print("{:<15s}{:>4s}".format(subword, label_map[category]))
 
-def evaluate(args, label_map, rev_label_map, spmproc, ulmfit_tagger):
+def evaluate(args, label_map, rev_label_map, spmproc, rnn_tagger):
     eval_jsonl = r_jsonl(args['eval_jsonl'])
     tokenized, numericalized, labels, encoded_labels = tokenize_and_align_labels(spmproc=spmproc,
                                                                                  sents=eval_jsonl,
@@ -57,11 +57,11 @@ def evaluate(args, label_map, rev_label_map, spmproc, ulmfit_tagger):
                                                                                  onehot_encode=True if args.get('multilabel') else False,
                                                                                  add_bos=True,
                                                                                  add_eos=True)
-    ulmfit_tagger.load_weights(args['model_weights_cp']).expect_partial()
+    rnn_tagger.load_weights(args['model_weights_cp']).expect_partial()
     print("Restored weights successfully")
-    ulmfit_tagger.summary()
+    rnn_tagger.summary()
     print(label_map)
-    model_preds = ulmfit_tagger.predict(numericalized)
+    model_preds = rnn_tagger.predict(numericalized)
     y_preds = tf.argmax(model_preds, axis=2).numpy().flatten().tolist()
     y_true = [x for y in encoded_labels for x in y]
     assert len(y_true) == len(y_preds)
@@ -113,21 +113,19 @@ def main(args):
         loss_fn = RaggedSparseCategoricalCrossEntropy() \
                   if args.get('fixed_seq_len') is None \
                   else tf.keras.losses.SparseCategoricalCrossentropy()
-    ulmfit_tagger, hub_object = ulmfit_sequence_tagger(model_type=args['model_type'],
-                                                       pretrained_encoder_weights=None if args.get('eval') or args.get('interactive') else args['model_weights_cp'],
-                                                       spm_model_args=spm_args,
-                                                       fixed_seq_len=args.get('fixed_seq_len'),
-                                                       num_classes=len(label_map),
-                                                       activation=activation,
-                                                       layer_config=layer_config)
+    rnn_tagger, hub_object = build_sequence_tagger(model_type=args['model_type'],
+                                                   pretrained_encoder_weights=None if args.get('eval') or args.get('interactive') else args['model_weights_cp'],
+                                                   spm_model_args=spm_args,
+                                                   fixed_seq_len=args.get('fixed_seq_len'),
+                                                   num_classes=len(label_map),
+                                                   activation=activation,
+                                                   layer_config=layer_config)
     if args.get('eval'):
-        evaluate(args, label_map, rev_label_map, spmproc, ulmfit_tagger)
+        evaluate(args, label_map, rev_label_map, spmproc, rnn_tagger)
         return
     elif args.get('interactive'):
-        interactive_demo(label_map, spmproc, ulmfit_tagger, args['model_weights_cp'])
+        interactive_demo(label_map, spmproc, rnn_tagger, args['model_weights_cp'])
         return
-    else:
-        raise NotImplementedError("Training function during porting...")
 
     check_unbounded_training(args.get('fixed_seq_len'), args.get('max_seq_len'))
     train_jsonl = r_jsonl(args['train_jsonl'])
@@ -164,7 +162,7 @@ def main(args):
         scheduler = args['lr']
     optimizer_fn = tf.keras.optimizers.Adam(learning_rate=scheduler)
     main_metric = 'accuracy' if args.get('multilabel') else 'sparse_categorical_accuracy'
-    callbacks = prepare_keras_callbacks(args=args, model=ulmfit_tagger, hub_object=hub_object,
+    callbacks = prepare_keras_callbacks(args=args, model=rnn_tagger, hub_object=hub_object,
                                         monitor_metric=main_metric)
     if args.get('lr_scheduler') == '1cycle':
         print("Fitting with one-cycle")
@@ -178,13 +176,13 @@ def main(args):
     save_last_path = os.path.join(args['out_path'], 'tagger_last')
     os.makedirs(save_last_path, exist_ok=True)
 
-    ulmfit_tagger.summary()
-    ulmfit_tagger.compile(optimizer=optimizer_fn, loss=loss_fn, metrics=[main_metric])
+    rnn_tagger.summary()
+    rnn_tagger.compile(optimizer=optimizer_fn, loss=loss_fn, metrics=[main_metric])
 
     # ##### This works only with fixed-length sequences:
-    ulmfit_tagger.fit(sequence_inputs, subword_labels, epochs=args['num_epochs'], batch_size=args['batch_size'],
+    rnn_tagger.fit(sequence_inputs, subword_labels, epochs=args['num_epochs'], batch_size=args['batch_size'],
                       callbacks=callbacks)
-    ulmfit_tagger.save_weights(save_last_path)
+    rnn_tagger.save_weights(save_last_path)
 
     ##### For RaggedTensors and variable-length sequences we have to use the GradientTape ########x
 

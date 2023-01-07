@@ -2,7 +2,7 @@
 
 import tensorflow as tf
 
-class QRNNCell_(tf.keras.layers.Layer):
+class QRNNCellImplementation(tf.keras.layers.Layer):
     """
     A QRNN cell usable with Keras' RNN API in TF 2.0.
 
@@ -11,8 +11,7 @@ class QRNNCell_(tf.keras.layers.Layer):
 
     Statefulness and return_sequences is handled via Keras RNN API - no need to write these explicitly here.
 
-    Not optimized for CUDA, not tested when serializing/deserializing into a SavedModel - contributions are
-    welcome. Leave a pull request or send me an email: hk*at_symbol^hubertkarbowy.pl.
+    Not optimized for CUDA.
     """
 
 
@@ -55,7 +54,7 @@ class QRNNCell_(tf.keras.layers.Layer):
                      "which computes `c_t`, but after close scrutiny and comparison with the QRNN paper, it seems fastai's " \
                      "implementation of Equation (4) is incorect. Also, they pass the `h_t` to the next time step as the" \
                      "cell's memory, and output `c_t` as the representation of sequence up-to-and-including the current time step, "\
-                     "not vice versa as was in an LSTM network and as recurrence in Eq (4) suggests.\n\nIf you have imported weights from " \
+                     "not vice versa as was in an LSTM network and as recurrence in Eq (4) suggests.\n\nIf you are importing weights from " \
                      "fastai, you will get identical results, but do bear in mind that their implementation looks suspicious")
 
         self.num_input_features = input_shape[1] # tu trzeba wydobyc rozmiar z poprzedniej warstwy (np. 400 dla embeddingow)
@@ -68,7 +67,7 @@ class QRNNCell_(tf.keras.layers.Layer):
         self.fused_biases  = self.add_weight(shape=(self.num_matrices_in_fused_kernel * self.hidden_units),
                                               initializer='zeros',
                                               name='fused_gate_biases',
-                                              trainable=False)
+                                              trainable=True)
         self.built = True
 
 

@@ -16,28 +16,32 @@ import tensorflow as tf
 from ..lm_tokenizers import LMTokenizerFactory
 from ..commons import read_numericalize, check_unbounded_training, print_training_info, prepare_keras_callbacks
 from ..encoders import STLRSchedule, OneCycleScheduler, PredictionProgressCallback
-from ..heads import ulmfit_regressor
+from ..heads import build_regressor
 
 
 def interactive_demo(args):
     spm_args = {'spm_model_file': args['spm_model_file'], 'add_bos': True, 'add_eos': True,
                 'lumped_sents_separator': '[SEP]'}
+    layer_config = {'qrnn': args.get('qrnn'),
+                    'num_recurrent_layers': args.get('num_recurrent_layers'),
+                    'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
     spm_encoder = LMTokenizerFactory.get_tokenizer(tokenizer_type='spm_tf_text',
                                                    tokenizer_file=args['spm_model_file'],
                                                    fixed_seq_len=args.get('fixed_seq_len'),
                                                    add_bos=True, add_eos=True)
-    ulmfit_regressor_model, hub_object = ulmfit_regressor(model_type=args['model_type'],
-                                                          pretrained_encoder_weights=None,
-                                                          spm_model_args=spm_args,
-                                                          fixed_seq_len=args.get('fixed_seq_len'),
-                                                          with_batch_normalization=args.get('with_batch_normalization') or False)
-    ulmfit_regressor_model.load_weights(args['model_weights_cp']).expect_partial()
-    ulmfit_regressor_model.summary()
+    regressor_model, _ = build_regressor(model_type=args['model_type'],
+                                         pretrained_encoder_weights=None,
+                                         spm_model_args=spm_args,
+                                         fixed_seq_len=args.get('fixed_seq_len'),
+                                         with_batch_normalization=args.get('with_batch_normalization') or False,
+                                         layer_config=layer_config)
+    regressor_model.load_weights(args['model_weights_cp']).expect_partial()
+    regressor_model.summary()
     readline.parse_and_bind('set editing-mode vi')
     while True:
         sent = input("Paste a document to classify using a regressor: ")
         subword_ids = spm_encoder(tf.constant([sent]))
-        y_hat = ulmfit_regressor_model.predict(subword_ids)[0]
+        y_hat = regressor_model.predict(subword_ids)[0]
         print(f"Score: = {y_hat}")
 
 def read_tsv_and_numericalize(*, tsv_file, args, also_return_df=False):
@@ -88,21 +92,21 @@ def evaluate(args):
     layer_config = {'qrnn': args.get('qrnn'),
                     'num_recurrent_layers': args.get('num_recurrent_layers'),
                     'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
-    ulmfit_regressor_model, hub_object = ulmfit_regressor(model_type=args['model_type'],
-                                                          pretrained_encoder_weights=None,
-                                                          spm_model_args=spm_args,
-                                                          fixed_seq_len=args.get('fixed_seq_len'),
-                                                          with_batch_normalization=args.get('with_batch_normalization') or False,
-                                                          layer_config=layer_config)
-    ulmfit_regressor_model.load_weights(args['model_weights_cp'])
-    ulmfit_regressor_model.summary()
-    y_preds = ulmfit_regressor_model.predict(x_test, batch_size=args['batch_size'],
-                                             callbacks=[PredictionProgressCallback(x_test.shape[0] // args['batch_size'])])
+    regressor_model, _ = build_regressor(model_type=args['model_type'],
+                                         pretrained_encoder_weights=None,
+                                         spm_model_args=spm_args,
+                                         fixed_seq_len=args.get('fixed_seq_len'),
+                                         with_batch_normalization=args.get('with_batch_normalization') or False,
+                                         layer_config=layer_config)
+    regressor_model.load_weights(args['model_weights_cp'])
+    regressor_model.summary()
+    y_preds = regressor_model.predict(x_test, batch_size=args['batch_size'],
+                                      callbacks=[PredictionProgressCallback(x_test.shape[0] // args['batch_size'])])
     y_test = y_test.numpy().tolist()
     y_preds = np.squeeze(y_preds)
     if args.get('normalize_labels'):
         max_label_value = tf.reduce_max(y_test_orig)
-        y_preds_rescaled =  ((max_label_value - 1.0) * (y_preds)) + 1.0
+        y_preds_rescaled = ((max_label_value - 1.0) * (y_preds)) + 1.0
     else:
         y_preds_rescaled = y_preds
     y_preds = y_preds.tolist(); y_preds_rescaled = y_preds_rescaled.numpy().tolist()
@@ -139,12 +143,12 @@ def main(args):
     layer_config = {'qrnn': args.get('qrnn'),
                     'num_recurrent_layers': args.get('num_recurrent_layers'),
                     'qrn_zoneout': args.get('qrnn_zoneout') or 0.0}
-    ulmfit_regressor_model, hub_object = ulmfit_regressor(model_type=args['model_type'],
-                                                          pretrained_encoder_weights=args['model_weights_cp'],
-                                                          spm_model_args=spm_args,
-                                                          fixed_seq_len=args.get('fixed_seq_len'),
-                                                          with_batch_normalization=args.get('with_batch_normalization') or False,
-                                                          layer_config=layer_config)
+    ulmfit_regressor_model, hub_object = build_regressor(model_type=args['model_type'],
+                                                         pretrained_encoder_weights=args['model_weights_cp'],
+                                                         spm_model_args=spm_args,
+                                                         fixed_seq_len=args.get('fixed_seq_len'),
+                                                         with_batch_normalization=args.get('with_batch_normalization') or False,
+                                                         layer_config=layer_config)
     ulmfit_regressor_model.summary()
     num_steps = (x_train.shape[0] // args['batch_size']) * args['num_epochs']
     print_training_info(args=args, x_train=x_train, y_train=y_train)

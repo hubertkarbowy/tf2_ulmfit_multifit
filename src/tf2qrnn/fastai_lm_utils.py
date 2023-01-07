@@ -7,7 +7,6 @@ from fastai.text.data import TensorText
 from fastcore.foundation import L
 
 from .commons import count_lines_in_text_file
-from .encoders import tf2_ulmfit_encoder
 
 
 def lr_or_default(lr, learner_obj):
@@ -49,40 +48,3 @@ def get_fastai_tensors(args):
     else:
         return L_tensors_train, L_tensors_valid
 
-def save_as_keras(*, state_dict, exp_name, save_path, spm_model_file, fixed_seq_len, layer_config):
-    """
-    Creates an ULMFit inference model using Keras layers and copies weights from FastAI's learner.model.state_dict() there.
-    """
-    spm_args = {
-        'spm_model_file': spm_model_file,
-        'add_bos': True,
-        'add_eos': True,
-        'lumped_sents_separator': '[SEP]'
-    }
-    lm_num, encoder_num, outmask_num, spm_encoder_model = tf2_ulmfit_encoder(fixed_seq_len=fixed_seq_len, spm_args=spm_args,
-                                                                             layer_config=layer_config)
-    lm_num.summary()
-    lm_num.get_layer('ulmfit_embeds').set_weights([state_dict['0.encoder.weight'].cpu().numpy()])
-
-    for i_rnn in range(layer_config['num_recurrent_layers']):
-        if layer_config['qrnn']:
-            rnn_weights = [state_dict[f'0.rnns.{i_rnn}.layers.0.linear.weight_raw'].cpu().numpy().T,
-                           state_dict[f'0.rnns.{i_rnn}.layers.0.linear.module.bias'].cpu().numpy()]
-            keras_layer = lm_num.get_layer(f'QRNN{i_rnn+1}')
-            print(f"FastAI shapes: {rnn_weights[0].shape} and {rnn_weights[1].shape}")
-            print(f"Keras shapes: {keras_layer.variables[0].shape} and {keras_layer.variables[1].shape}")
-            keras_layer.set_weights(rnn_weights)
-
-        else:
-            rnn_weights = [state_dict[f'0.rnns.{i_rnn}.module.weight_ih_l0'].cpu().numpy().T,
-                           state_dict[f'0.rnns.{i_rnn}.weight_hh_l0_raw'].cpu().numpy().T,
-                           state_dict[f'0.rnns.{i_rnn}.module.bias_ih_l0'].cpu().numpy()*2]
-            lm_num.get_layer(f'AWD_RNN{i_rnn+1}').set_weights(rnn_weights)
-
-    keras_lm_head_name = 'lm_head_tied' if layer_config['num_hidden_units'][-1] == layer_config['emb_dim'] \
-                         else 'lm_head_untied'
-
-    lm_num.get_layer(keras_lm_head_name).set_weights([state_dict['1.decoder.bias'].cpu().numpy(),
-                                                      state_dict['1.decoder.weight'].cpu().numpy()])
-    lm_num.save_weights(os.path.join(save_path, exp_name))
-    return lm_num, encoder_num, outmask_num, spm_encoder_model
