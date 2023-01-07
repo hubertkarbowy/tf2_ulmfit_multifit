@@ -84,7 +84,7 @@ def build_sequence_tagger(*, model_type, pretrained_encoder_weights, spm_model_a
         raise ValueError(f"Unknown model type {model_type}")
     tagger_head = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(num_classes, activation=activation))(ulmfit_rnn_encoder.output)
     tagger_model = tf.keras.models.Model(inputs=ulmfit_rnn_encoder.inputs, outputs=tagger_head)
-    return tagger_model
+    return tagger_model, hub_object
 
 
 def build_document_classifier(*, model_type, pretrained_encoder_weights, num_classes,

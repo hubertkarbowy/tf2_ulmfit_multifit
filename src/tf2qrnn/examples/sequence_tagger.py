@@ -128,7 +128,10 @@ def main(args):
         return
 
     check_unbounded_training(args.get('fixed_seq_len'), args.get('max_seq_len'))
-    train_jsonl = r_jsonl(args['train_jsonl'])
+    train_jsonl_orig = r_jsonl(args['train_jsonl'])
+    train_jsonl = []
+    for line in train_jsonl_orig:
+        train_jsonl.append([[x[0], label_map[x[1]]] for x in line])
     tokenized, numericalized, labels, encoded_labels = tokenize_and_align_labels(spmproc=spmproc,
                                                                                  sents=train_jsonl,
                                                                                  max_seq_len=args.get('fixed_seq_len'),
@@ -234,7 +237,7 @@ if __name__ == "__main__":
                       "scheduler (slanted triangular, one-cycle or constant LR)")
     argz.add_argument("--interactive", action='store_true', help="Run the script in interactive mode")
     argz.add_argument("--save-best", action='store_true', help="Save the best checkpoint")
-    argz.add_argument("--out-path", required=True, help="Training: Checkpoint name to save every N steps, " \
+    argz.add_argument("--out-path", required=False, help="Training: Checkpoint name to save every N steps, " \
                                                         "Eval: tsv file to store the results, Demo: pass '/dev/null'")
     argz = vars(argz.parse_args())
     if all([argz.get('max_seq_len') and argz.get('fixed_seq_len')]):
@@ -244,7 +247,5 @@ if __name__ == "__main__":
     if argz.get('train_jsonl') is None and argz.get('interactive') is None and argz.get('eval') is None:
         print("Please provide either a data file for training / evaluation or run the script with --interactive switch")
         exit(0)
-    if argz.get('interactive') is True:
-        interactive_demo(argz)
     else:
         main(argz)

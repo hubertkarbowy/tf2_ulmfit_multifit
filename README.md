@@ -383,7 +383,7 @@ This representation is then passed through a 50-dimensional Dense layer. The las
 Example invocation:
 
 ```
-python -m examples.ulmfit_tf_text_classifier \
+python -m tf2qrnn.examples.classifier \
           --train-tsv examples_data/sent200.tsv \
           --data-column-name sentence \
           --gold-column-name sentiment \
@@ -392,24 +392,27 @@ python -m examples.ulmfit_tf_text_classifier \
           --model-type from_cp \
           --spm-model-file spm_models/enwiki100-uncased-sp35k.model \
           --fixed-seq-len 70 \
-          --num-epochs 12 \
+          --num-epochs 10 \
           --batch-size 16 \
           --lr 0.0025 \
           --lr-scheduler stlr \
           --out-path ./sent200trained \
+          --qrnn --awd-off \
           --save-best
 ```
 
 Now your classifier is ready in the `sent200trained` directory. The above command trains a classifier on a toy dataset and is almost guaranteed to overfit, but do give it a try with a demo:
 
 ```
-python -m examples.ulmfit_tf_text_classifier \
+python -m examples.classifier \
           --label-map examples_data/document_classification_labels.txt \
           --model-weights-cp sent200trained/best_checkpoint/best \
+          --qrnn \
           --model-type from_cp \
           --spm-model-file enwiki100-uncased-sp35k.model \
-          --fixed-seq-len 300 \
+          --fixed-seq-len 70 \
           --interactive
+          
 
 Paste a document to classify: this is the most depressing film i've ever seen . so boring i left before it finished .
 [('POSITIVE', 0.08279895782470703), ('NEGATIVE', 0.917201042175293)]
@@ -421,7 +424,7 @@ Classification result: P(POSITIVE) = 0.998953104019165
 
 
 
-### 4.4. Regressor (`ulmfit_tf_regressor.py`)
+### 4.4. Regressor (`regressor.py`)
 
 Sometimes instead of predicting a label from a fixed set of classes, you may want to predict a number. For instance, instead of classifying a hotel review as 'positive', 'negative', or 'neutral', you may want to predict the number of stars it was given. This is a regression task and and it turns out we can use ULMFiT for that purpose as well.
 
@@ -430,19 +433,20 @@ We have observed that the regressor training often goes terribly wrong if the da
 Example invocation:
 
 ```
-python -m examples.ulmfit_tf_regressor \
+python -m tf2qrnn.examples.regressor \
           --train-tsv examples_data/hotels200.tsv \
           --data-column-name review \
           --gold-column-name rating \
           --model-weights-cp keras_weights/enwiki100_20epochs_35k_uncased \
           --model-type from_cp \
           --spm-model-file spm_model/enwiki100-uncased-sp35k.model \
-          --fixed-seq-len 350 \
+          --fixed-seq-len 70 \
           --batch-size 16 \
           --num-epochs 12 \
           --lr 0.0025 \
           --lr-scheduler stlr \
           --loss-fn mse \
+          --qrnn --awd-off \
           --out-path ./hotel_regressor \
           --save-best
 ```
@@ -452,11 +456,12 @@ The `--loss-fn` can be set to `mse` (mean squared error) or `mae` (mean absolute
 After training the regressor, run the demo:
 
 ```
-python -m examples.ulmfit_tf_regressor \
+python -m tf2qrnn.examples.regressor \
           --model-weights-cp hotel_regressor/best_checkpoint/best \
           --model-type from_cp \
+          --qrnn \
           --spm-model-file spm_model/enwiki100-toks-sp35k-uncased.model \
-          --fixed-seq-len 350 \
+          --fixed-seq-len 70 \
           --interactive
 
 ...
@@ -469,7 +474,7 @@ Score: = [5.979812]
 
 
 
-Compare this to a model trained with `--normalize-labels`:
+Compare this to a model trained with `--normalize-labels` (note: this does not guarantee that the actual output will be in the range from 0 to 1, as illustrated by the second example)
 
 ```
 Paste a document to classify using a regressor: horrible hotel no security stole laptop avoid like plague
@@ -480,7 +485,7 @@ Score: = [1.145164]
 
 
 
-### 4.5. Sequence tagger (`ulmfit_tf_seqtagger.py`) with a custom training loop
+### 4.5. Sequence tagger (`sequence_tagger.py`)
 
 A sequence tagging task involves marking each token as belonging to one of the classes. The typical examples here are Named Entity Recognition (NER) and Part-of-Speech (POS) tagging. Our example script uses input data with annotations on the word level (a small sample of sentences from the CONLL2013 dataset). These are provided as a JSONL file containing lists of tuples:
 
@@ -495,7 +500,7 @@ The numbers in the second element of each tuple are the token label defined in t
  "4": "I-ORG", "5": "B-PER", "6": "I-PER"}
 ```
 
-The vast majority of publicly available datasets for such tasks contain annotations on the word level. However, our version of ULMFiT uses subword tokenization which is almost universally adopted in newer language models. This means that the labels need to be re-aligned to subwords. The `ulmfit_tf_tagger.py` script contains a simple function called `tokenize_and_align_labels` which does that for you. 
+The vast majority of publicly available datasets for such tasks contain annotations on the word level. However, our version of MultiFiT / ULMFiT uses subword tokenization which is almost universally adopted in newer language models. This means that the labels need to be re-aligned to subwords. The `sequence_tagger.py` script contains a simple function called `tokenize_and_align_labels` which does that for you. 
 
 * Input word-level annotations from the training corpus
 
@@ -525,33 +530,11 @@ The vast majority of publicly available datasets for such tasks contain annotati
   </s>              O
   ```
 
-  
 
-The `ulmfit_tf_tagger.py` scripts also illustrates how you can use the ULMFiT model in a custom training loop. Instead of building a Keras model and calling `model.fit`, we create a training function that uses `tf.GradientTape`. Pay close attention to how the AWD regularization is applied:
-
-* if you are training on files from Tensorflow Hub - call the module's `apply_awd`serialized `tf.function` before each batch,
-* if you are using Keras weights - call`apply_awd_eagerly` from `ulmfit_tf2.py` before each batch
+Example invocation (training - note: you need the *cased* model):
 
 ```
-def train_step(*, model, hub_object, loss_fn, optimizer, awd_off=None, x, y, step_info):
-    if awd_off is not True:
-        if hub_object is not None: hub_object.apply_awd(0.5)
-        else: apply_awd_eagerly(model, 0.5)
-    with tf.GradientTape() as tape:
-        y_preds = model(x, training=True)
-        loss_value = loss_fn(y_true=y, y_pred=y_preds)
-        print(f"Step {step_info[0]}/{step_info[1]} | batch loss before applying gradients: {loss_value}")
-
-    grads = tape.gradient(loss_value, model.trainable_variables)
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
-```
-
-
-
-Example invocation (training):
-
-```
-python -m examples.ulmfit_tf_seqtagger \
+python -m tf2qrnn.examples.sequence_tagger \
           --train-jsonl examples_data/conll1000.jsonl \
           --label-map examples_data/tagger_labels.json \
           --spm-model-file spm_model/enwiki100-toks-sp35k-cased.model \
@@ -559,34 +542,41 @@ python -m examples.ulmfit_tf_seqtagger \
           --model-type from_cp \
           --batch-size 32 \
           --num-epochs 5 \
-          --fixed-seq-len 350 \
+          --fixed-seq-len 70 \
+          --save-best \
+          --qrnn --awd-off \
           --out-path ./conll_tagger
 ```
 
 Example invocation (demo - note the side effect of coarse alignment of B-LOC with all subwords of the first word in the training corpus. A more careful approach would have been to align B-LOC with only the first subword. 'Melfordshire' could then be tagged as `_M/B-LOC, elf/I-LOC, ord/I-LOC, shire/I-LOC`):
 
 ```
-python -m examples.ulmfit_tf_seqtagger \
+python -m tf2qrnn.examples.sequence_tagger \
           --label-map examples_data/tagger_labels.json \
-          --model-weights-cp ./conll_tagger/tagger \
+          --model-weights-cp ./conll_tagger/tagger_best/best \
           --model-type from_cp \
           --spm-model-file spm_model/enwiki100-toks-sp35k-cased.model \
+          --qrnn \
+          --fixed-seq-len 70 \
           --interactive
 
-Write a sentence to tag: What is the weather in Melfordshire ?
+Write a sentence to tag: What is the weather like in England ?
 <s>               O
 ▁What             O
-▁is               O
+'                 O
+s                 O
 ▁the              O
 ▁weather          O
+▁like             O
 ▁in               O
-▁M             B-LOC
-elf            B-LOC
-ord            B-LOC
-shire          B-LOC
+▁England       B-LOC
 ▁                 O
 ?                 O
 </s>              O
+<pad>             O
+<pad>             O
+<pad>             O
+.......
 ```
 
 
@@ -595,9 +585,7 @@ shire          B-LOC
 
 ## 5. Pretraining your own language model from scratch (`pretraining_utils`)
 
-This section describes how to use a raw text corpus to train an ULMFiT language model. As explained at the beginning of this document and on our TFHub page, we use FastAI to train encoder weights, which we then convert to a Tensorflow model with the [convert_fastai2keras.py](convert_fastai2keras.py) script.
-
-Our data preparation methods are somewhat different from the approach taken by FastAI's authors described in [Training a text classifier](https://docs.fast.ai/tutorial.text.html#Training-a-text-classifier). In particular, our data is sentence-tokenized. We also dispense with special tokens for such as `\\xmaj` or `\\xxrep` and rely on sentencepiece tokenization entirely. For these reasons our training script skips all the preprocessing, tokenization, transforms and numericalization steps, and expect inputs to be provided in an already numericalized form. Some of these steps are factored out to external scripts instead, which you will find in the [pretraining_utils](pretraining_utils) directory and which are described below.
+This section describes how to use a raw text corpus to train an ULMFiT or MultiFiT language model. As explained at the beginning of this document, we use FastAI to train encoder weights, which we then convert to a Tensorflow model with the [convert_fastai2keras.py](convert_fastai2keras.py) script.
 
 Obtaining source data and cleaning it up will require different techniques for each data source. Here we assume that you are already past this stage and **that you already have a reasonably clean raw corpus**. All you need to do is save it as three large plain text files (e.g. `train.txt`, `valid.txt` and `test.txt`) with one sentence per line. This is important since our scripts add BOS and EOS markers at the beginning and end of each line. As an alternative, you may want to train a language model on paragraphs or documents - in which each line in your text files will need to correspond to a paragraph or a document.
 
@@ -610,7 +598,7 @@ If your text isn't already sentence-tokenized, you can split it into sentences i
 Example invocation:
 
 ```
-python -m pretraining_utils.01_cleanup \
+python -m tf2qrnn.pretraining_utils.01_cleanup \
           --lang english \
           --input-text train_raw.txt \
           --out-path ./train_sents.txt
@@ -627,7 +615,7 @@ Those of you who are proficient in using sentencepiece from the command line can
 Example invocation:
 
 ```
-python -m pretraining_utils.02_build_spm \
+python -m tf2qrnn.pretraining_utils.02_build_spm \
           --corpus-path train_sents.txt \
           --vocab-size 5000 \
           --model-prefix wittgenstein
@@ -660,7 +648,7 @@ Because it was important for us to have full control over numericalization (we d
 Example invocation:
 
 ```
-python -m pretraining_utils.03_encode_spm \
+python -m tf2qrnn.pretraining_utils.03_encode_spm \
           --corpus-path ./train_sents.txt \
           --model-path ./wittgenstein-sp5k.model \
           --spm-extra-options bos:eos \
@@ -677,7 +665,7 @@ Congratulations! Now that your data is mangled, all you need to do is execute Fa
 Example invocation:
 
 ```
-python ./fastai_ulmfit_train.py \
+python -m tf2qrnn.fastai_ulmfit_train \
        --pretokenized-train ./train_ids.txt \
        --min-seq-len 7 \
        --max-seq-len 80 \
@@ -706,7 +694,7 @@ The result is as FastAI model file called `wittg.pth` which will be saved in the
 Weights from the file created by FastAI should be exported to a format usable by Tensorflow. This is done with the `convert_fastai2keras.py` script:
 
 ```
-CUDA_VISIBLE_DEVICES=-1 python ./convert_fastai2keras.py \
+CUDA_VISIBLE_DEVICES=-1 python -m tf2qrnn.convert_fastai2keras.py \
     --pretrained-model wittgenstein_lm/wittg.pth \
     --spm-model-file ./wittgenstein-sp5k.model \
     --out-path ./tf_wittgenstein
@@ -738,136 +726,9 @@ As you can see it contains four subdirectories:
 
 * **fastai_model** - the original file used by FastAI. You still need that .pth file if you want to do unsupervised finetuning on a target (unlabelled) domain data because our Tensorflow implementatiion does not support that yet.
 
-* **keras_weights** - the checkpoint which you can restore into a Keras model created from python code (see section 3.3):
+* **keras_weights** - the checkpoint which you can restore into a Keras model created from python code
 
-  ```
-  _, encoder_num, _, _ = tf2_ulmfit_encoder(spm_args=spm_args, flatten_ragged_outputs=False)
-  encoder_num.load_weights('keras_weights/wittg').expect_partial()
-  ```
-
-* **saved_model** - a serialized version of ULMFiT's graph stored together with its weights. This will produce TFHub-loadable modules with three signatures: string_encoder, numericalized_encoder and spm_processor (see the guide on our Tensorflow Hub page for detailed instructions how to use ULMFiT in the SavedModel format).
-
-
-
-### 5.6. Unsupervised fine-tuning a pretrained language model in FastAI (`fastai_ulmfit_train.py` again)
-
-If you are reading this page, you are probably all too familiar with this diagram from ULMFiT's authors:
-
-![ulmfit_approach](ulmfit_approach.webp)
-
-One important thing to remember is **what is meant by "fine-tuning"**. The ML community tends to use this term in two slightly different contexts:
-
-1. Adapting the general language model (grey arrow) to be more like the target domain (brown arrow) by resuming training on unlabeled text.
-2. Training any language model (general or adapted to a domain) with a classifier head on top (yellow arrow).
-
-When people talk about fine-tuning BERT, they typically skip the brown arrow altogether (unless the target domain is very large or very specific) and proceed straight to training the classifier (yellow arrow) using off-the-shelf weights. On the other hand, fine-tuning an ULMFiT model usually involves both steps.
-
-The pretrained models we provide via Tensorflow Hub (the grey arrow) can of course be used on the target task directly and still give decent results. But since they were trained on Wikipedia, they will never achieve accuracy scores in high nineties on datasets of conversational language or tweets. However, if you have an unlabelled corpus of texts from the target domain, you can use the `fastai_ulmfit_train.py` script again to produce the "intermediate" / adapted (brown arrow) model. The snag is, it's still FastAI (not TF), but once you have the `.pth` file, it can be converted to a TF-usable format with the script mentioned in the previous section.
-
-When running the `fastai_ulmfit_train.py` script you can optionally pass learning rate parameters via `--pretrain-lr` and `--finetune-lr` arguments for the one-cycle policy optimizer (see help descriptions). If you don't specify them, the script will run FastAI's [learning rate finder](https://fastai1.fast.ai/callbacks.lr_finder.html#lr_find) and set these parameters automatically.
-
-**CAUTION:** Make sure that your input data (`plato_ids.txt` and optionally `plato_valid_ids.txt` in the example below) is numericalized using exactly the same Sentencepiece model as the original corpus. Do not build a new SPM vocabulary on the finetuning corpus! Also note that the argument to `--pretrained-model` is a path to the `.pth` file without the `.pth` extension (this is a FastAI quirk).
-
-Example invocation:
-
-```
-python ./fastai_ulmfit_train.py  \
-       --pretokenized-train ./plato_ids.txt \
-       --pretokenized-valid ./plato_valid_ids.txt \
-       --pretrained-model wittgenstein_lm/wittg \
-       --min-seq-len 7 \
-       --max-seq-len 80 \
-       --batch-size 192 \
-       --vocab-size 5000 \
-       --num-epochs 12 \
-       --save-path ./plato_lm \
-       --exp-name plato
-       
- ...
-Will resume pretraining from wittgenstein_lm/wittg
-Freezing all recurrent layers, leaving trainable LM head tied to embeddings
-Running the LR finder...
-LR finder results: min rate 0.002754228748381138, rate at steepest gradient: 1.9054607491852948e-06
-epoch     train_loss  valid_loss  accuracy  perplexity  time    
-0         5.284248    5.141905    0.182006  171.041260  00:02                                 
-Running the LR finder...
-LR finder results: min rate 0.0009120108559727668, rate at steepest gradient: 3.981071586167673e-06
-epoch     train_loss  valid_loss  accuracy  perplexity  time    
-0         5.302782    5.137175    0.182840  170.234192  00:02                                  
-1         5.282693    5.109591    0.183950  165.602539  00:02                                  
-2         5.249281    5.065947    0.187762  158.530426  00:02                                  
-3         5.232862    5.027223    0.190075  152.508850  00:02                                  
-4         5.205404    4.987422    0.191596  146.558105  00:02                                  
-5         5.183253    4.953323    0.194990  141.644852  00:02                                  
-6         5.153776    4.925492    0.198641  137.757080  00:02                                  
-7         5.130646    4.900190    0.200972  134.315338  00:02                                  
-8         5.111114    4.897506    0.202472  133.955246  00:02                                  
-9         5.096784    4.886313    0.202836  132.464279  00:02                                   
-10        5.087708    4.885328    0.203029  132.333832  00:02                                   
-Saving the ULMFit model in FastAI format ...
-
- ...
-(now convert the .pth file to Tensorflow exactly like the original model - see section 5.5)
-```
-
-
-
-### 5.7. Language model demo (next token prediction - `04_demo.py`) and perplexity evaluation
-
-To get an intuition on what is inside your pretrained or finetuned model you can run a next-token prediction demo in `04_demo.py`. This script allows you to type a sentence beginning in the console and suggests the next most likely tokens. We wanted to keep the code as simple as possible and decided to use a simple greedy search rather than a more complicated beam search. Feel free to modify it though if you are working on something like a T9-style sentence completion.
-
-Example invocation:
-
-```
-python -m pretraining_utils.04_demo \
-       --pretrained-model tf_wittgenstein/keras_weights/wittg2 \
-       --model-type from_cp \
-       --spm-model-file tf_wittgenstein/spm_model/wittgenstein-sp5k.model \
-       --add-bos
-       
-...
-Write a sentence to complete: The limits of
->>>>>>>>>>>>>>>>>>>>>>>>>>>>
-[2, 202, 2238, 1005, 21]
-Encoded as 5 pieces: ['<s>', '▁The', '▁lim', 'its', '▁of']
-[9, 8, 74, 104]
-Candidate next pieces: [('▁the', 0.2268792986869812), ('▁a', 0.04109013453125954), ('▁which', 0.023897195234894753), ('▁them', 0.02332630380988121)]
->>>>>>>>>>>>>>>>>>>>>>>>>>>>
-[2, 202, 2238, 1005, 21, 9]
-Encoded as 6 pieces: ['<s>', '▁The', '▁lim', 'its', '▁of', '▁the']
-[220, 147, 299, 298]
-Candidate next pieces: [('▁State', 0.03588008135557175), ('▁other', 0.023058954626321793), ('▁soul', 0.022394457831978798), ('▁same', 0.02075115777552128)]
->>>>>>>>>>>>>>>>>>>>>>>>>>>>
-[2, 202, 2238, 1005, 21, 9, 220]
-Encoded as 7 pieces: ['<s>', '▁The', '▁lim', 'its', '▁of', '▁the', '▁State']
-[11, 46, 91, 21]
-Candidate next pieces: [('▁,', 0.2401089072227478), ('▁is', 0.09067995101213455), ('▁will', 0.04504721984267235), ('▁of', 0.04062267020344734)]
-```
-
-You can also calculate perplexity for a test corpus. The input format is the same as for training and fine-tuning (plain text files containing numericalized data). Just make sure you use the same Sentencepiece model as with the original corpus for numericalization.
-
-Example invocation:
-
-```
-python -m evaluation_scripts.calculate_ppl_fastai \
-          --pretokenized-test ./plato_test_ids.txt \
-          --pretrained-model ./tf_wittgenstein/fastai_model/wittg.pth \
-          --min-seq-len 7 \
-          --max-seq-len 300 \
-          --vocab-size 5000
-          
-...
-Processing batch 0/9
-Processing batch 1/9
-Processing batch 2/9
-Processing batch 3/9
-Processing batch 4/9
-Processing batch 5/9
-Processing batch 6/9
-Processing batch 7/9
-Processing batch 8/9
-Perplexity = 181.9491424560547 (on 36864 sequences (stateful!)
-```
+* **saved_model** - a serialized version of the model stored together with its weights. This will produce modules with three signatures: `string_encoder`, `numericalized_encoder` and `spm_processor` (see the section on restoring from a SavedModel above).
 
 
 
@@ -877,16 +738,11 @@ Perplexity = 181.9491424560547 (on 36864 sequences (stateful!)
 * [Transfer learning in text](https://docs.fast.ai/tutorial.text.html#The-ULMFiT-approach) - part of FastAI docs
 * [Universal Language Model Fine-Tuning (ULMFiT): State-of-the-Art in Text Analysis](https://humboldt-wi.github.io/blog/research/information_systems_1819/group4_ulmfit/#ttc) - analysis by researchers from the Humboldt University in Berlin
 * [Understanding building blocks of ULMFiT](https://blog.mlreview.com/understanding-building-blocks-of-ulmfit-818d3775325b) - blog post with detailed description and examples of dropouts used in the ULMFiT model
+* MultiFiT reference ... and code ...
 
-The code in this repo is by Hubert Karbowy and was forked from ....  Many thanks to my employer, edrone, for providing GPU machines for training and disk space for model hosting.
+The code in this repo was forked from ....  Many thanks to my employer, edrone, for providing GPU machines for training and disk space for model hosting.
 
 Contact me at [hk@hubertkarbowy.pl](hk@hubertkarbowy.pl) if you find bugs or need support.
-
-
-
-## 7. Smietniczek
-
-This can be modified by running the `convert_fastai2keras.py` script again and setting the `--fixed-seq-len` parameter to a different value. It is also possible to get models with variable number of tokens by omitting this parameter - in this case the outputs will need further processing into [RaggedTensors](https://www.tensorflow.org/api_docs/python/tf/RaggedTensor), which is explained below.
 
 
 

@@ -74,6 +74,7 @@ def tokenize_and_align_labels_single(*,
                                      rev_label_map=None,
                                      is_multilabel,
                                      onehot_encoder=None,
+                                     outside_symbol = 'O',
                                      add_bos,
                                      add_eos):
     """
@@ -95,7 +96,7 @@ def tokenize_and_align_labels_single(*,
         raise ValueError("When realigning labels to subwords, please disable `add_eos` in the Sentencepiece object")
     if onehot_encoder is not None and rev_label_map is None:
         raise ValueError("Please provide a reverse labels map if requesting to one-hot encode/multiencode the labels")
-    no_label_symbol = [] if is_multilabel else 'O'
+    no_label_symbol = [] if is_multilabel else outside_symbol
     sentence_tokens = []
     sentence_ids = []
     sentence_labels = []
@@ -128,6 +129,8 @@ def tokenize_and_align_labels_single(*,
         assert len(sentence_tokens) == len(sentence_ids) == len(sentence_labels) == max_seq_len
 
     # optionally encode labels:
+    print(rev_label_map)
+    print(sentence_labels)
     if rev_label_map:
         if is_multilabel:
             encoded_labels = [[rev_label_map[l] for l in labels] for labels in sentence_labels]
