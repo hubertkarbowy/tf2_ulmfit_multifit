@@ -1,11 +1,11 @@
 # QRNN (Quasi-Recurrent Neural Network) and ULMFiT for Tensorflow 2.x
 
-Since the arrival of BERT, recurrent neural networks have fallen out of fashion in Natural Language Processing. In practical applications, however, there are still many use cases where a much lighter recurrent architecture is preferrable over the Transformer due to e.g. faster inference times or constraints on the computing power. This repo contains the implementation of two such recurrent architectures:
+Since the arrival of BERT, recurrent neural networks have fallen out of fashion in Natural Language Processing. In practical applications, however, there are still many use cases where a much lighter recurrent architecture is preferrable over the Transformer due to e.g. faster inference times or constraints on the computing power. This repo contains the implementation of two such recurrent architectures in Tensorflow:
 
-* **ULMFiT** - which is basically LSTM with improvements to the regularization techniques and a triangular learning rate scheduler,
-* **MultiFIT** - the evolution of the ULMFiT model in which LSTM cells were replaced by Quasi-Recurrent cells and a One-cycle learning rate scheduler was used.
+* **[ULMFiT](https://aclanthology.org/P18-1031/)** - which is basically LSTM with improvements to the regularization techniques and a triangular learning rate scheduler,
+* [**MultiFIT**](https://aclanthology.org/D19-1572) - the evolution of the ULMFiT model in which LSTM cells were replaced by Quasi-Recurrent cells and a One-cycle learning rate scheduler was used.
 
-Both architectures were originally implemented in the FastAI framework which itself is build over PyTorch. However, the implementations were poorly documented, examples were scarce and adaptation to custom data was challenging. FastAI's text processing pipeline is also rather inflexible. Subjectively, the two biggest issues are the difficulty in using subword tokenization and the baking in as defaults of some rather arcane transformations (for example, capital letters are downcased, but a `\\xxmaj` symbol is inserted before to denote capitalization). These issues can for sure be overcome by reverse-engineering FastAI code where the documentation remains silent. 
+Both architectures were originally implemented in the [FastAI](https://www.fast.ai/) framework which itself is build over [PyTorch](https://pytorch.org/). However, the implementations were poorly documented, examples were scarce and adaptation to custom data was challenging. FastAI's text processing pipeline is also rather inflexible. Subjectively, the two biggest issues are the difficulty in using subword tokenization and the baking in as defaults of some rather arcane transformations (for example, capital letters are downcased, but a `\\xxmaj` symbol is inserted before to denote capitalization). These issues can for sure be overcome by reverse-engineering FastAI code where the documentation remains silent. 
 
 Instead, a cleaner implementation of both architectures, less tightly coupled with the data preprocessing techniques is provided here for Tensorflow, which is also more familiar to the Machine Learning community and has a bigger user base than FastAI. 
 
@@ -72,10 +72,10 @@ model.signatures['string_encoder'](sents)
 
 The token vectors are under the `output` key. As you can see, the input sentences are automatically tokenized into wordpieces, converted to IDs ("numericalized") and padded to a sequence length of 70. There is quite a lot going on here and we'll explain the details later in this guide.
 
-To run the examples for document classification, sequence tagging etc. you need to install this repo via pip:
+To run the examples for document classification, sequence tagging etc. from Section 4 and 5 you need to install this repo via pip:
 
 ```
-TBC
+$ pip install tf2qrnn@git+https://github.com/hubertkarbowy/tf2qrnn.git
 ```
 
 Note, however, that the requirements **DO NOT INCLUDE** the dependencies needed for FastAI-related scripts - these are so outdated that including them would prevent any use of this package in a modern project. If needed (see next section), you will need to install them manually probably in a separate environment.
@@ -94,7 +94,7 @@ The classes in this repo are built on top of [Keras RNN API](https://www.tensorf
 
 However, when using transfer learning, models for downstream tasks such as sentiment analysis or named entity recognition can be trained to acceptable performance on much smaller volumes of data. Therefore, we use FastAI to pretrain only the language model (the encoder), then we export its weights and read them into and identically structured Keras equivalent. From this point, we can run the far less computation-intensive downstream task with only generic CUDA optimizations provided by Tensorflow and still finish the training in reasonable time.
 
-The script used to pretrain ULMFiT and MultiFiT language models in FastAI is called [convertfastai2keras.py](convertfastai2keras.py) - its usage and conversion to Keras is discussed below.
+The script used to pretrain ULMFiT and MultiFiT language models in FastAI is called [convert_fastai2keras.py](src/tf2qrnn/convert_fastai2keras.py) - its usage and conversion to Keras is discussed below.
 
 
 
@@ -404,7 +404,7 @@ python -m tf2qrnn.examples.classifier \
 Now your classifier is ready in the `sent200trained` directory. The above command trains a classifier on a toy dataset and is almost guaranteed to overfit, but do give it a try with a demo:
 
 ```
-python -m examples.classifier \
+python -m tf2qrnn.examples.classifier \
           --label-map examples_data/document_classification_labels.txt \
           --model-weights-cp sent200trained/best_checkpoint/best \
           --qrnn \
@@ -734,15 +734,12 @@ As you can see it contains four subdirectories:
 
 ## 6. References and acknowledgements
 
-* [Universal Language Model Fine-tuning for Text Classification](https://arxiv.org/abs/1801.06146) - the original paper
+* [Universal Language Model Fine-tuning for Text Classification](https://arxiv.org/abs/1801.06146) - the original paper on improvements made to the LSTM architecture
+* [MultiFiT: Efficient Multi-lingual Language Model Fine-tuning](https://aclanthology.org/D19-1572.pdf) - the paper describing the model in which LSTM cells were replaced with QRNN ones
 * [Transfer learning in text](https://docs.fast.ai/tutorial.text.html#The-ULMFiT-approach) - part of FastAI docs
 * [Universal Language Model Fine-Tuning (ULMFiT): State-of-the-Art in Text Analysis](https://humboldt-wi.github.io/blog/research/information_systems_1819/group4_ulmfit/#ttc) - analysis by researchers from the Humboldt University in Berlin
 * [Understanding building blocks of ULMFiT](https://blog.mlreview.com/understanding-building-blocks-of-ulmfit-818d3775325b) - blog post with detailed description and examples of dropouts used in the ULMFiT model
-* MultiFiT reference ... and code ...
 
-The code in this repo was forked from ....  Many thanks to my employer, edrone, for providing GPU machines for training and disk space for model hosting.
+The code in this repo was forked from my previous work on porting ULMFiT to Tensorflow and [published here](https://bitbucket.org/edroneteam/tf2_ulmfit/src/master/). Many thanks to my employer, [edrone](https://edrone.me/), for providing GPU machines for training.
 
 Contact me at [hk@hubertkarbowy.pl](hk@hubertkarbowy.pl) if you find bugs or need support.
-
-
-
